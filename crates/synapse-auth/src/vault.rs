@@ -129,7 +129,6 @@ impl VaultClient {
             .header("X-User-Id", user_id)
             .json(&serde_json::json!({
                 "provider": provider,
-                "category": "ai",
             }))
             .send()
             .await
