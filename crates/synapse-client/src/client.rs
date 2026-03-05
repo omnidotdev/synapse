@@ -111,6 +111,10 @@ impl SynapseClient {
     }
 
     /// Get the base URL (remote mode only)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fallback URL fails to parse (should never happen)
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
     pub fn base_url(&self) -> &Url {
@@ -160,7 +164,7 @@ impl SynapseClient {
                 let response = state
                     .complete(internal_req, context)
                     .await
-                    .map_err(crate::embedded::from_llm_error)?;
+                    .map_err(|e| crate::embedded::from_llm_error(&e))?;
                 Ok(crate::embedded::from_completion_response(response))
             }
         }
@@ -207,7 +211,7 @@ impl SynapseClient {
                 let (_, stream) = state
                     .complete_stream(internal_req, context)
                     .await
-                    .map_err(crate::embedded::from_llm_error)?;
+                    .map_err(|e| crate::embedded::from_llm_error(&e))?;
                 Ok(crate::embedded::stream_to_chat_events(stream))
             }
         }
@@ -303,7 +307,7 @@ impl SynapseClient {
                     temperature: None,
                 };
 
-                let (parts, _) = http::Request::new(()).into_parts();
+                let (parts, ()) = http::Request::new(()).into_parts();
                 let ctx = stt::RequestContext {
                     parts,
                     api_key: None,
@@ -360,7 +364,7 @@ impl SynapseClient {
                     speed: req.speed,
                 };
 
-                let (parts, _) = http::Request::new(()).into_parts();
+                let (parts, ()) = http::Request::new(()).into_parts();
                 let ctx = tts::RequestContext {
                     parts,
                     api_key: None,

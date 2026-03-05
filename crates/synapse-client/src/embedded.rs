@@ -162,8 +162,7 @@ pub fn stream_to_chat_events(
                                 id: id.clone(),
                                 name: name.clone(),
                             }));
-                        }
-                        if let Some(ref args) = func.arguments {
+                        } else if let Some(ref args) = func.arguments {
                             return Some(Ok(types::ChatEvent::ToolCallDelta {
                                 index: tc.index,
                                 arguments: args.clone(),
@@ -186,6 +185,6 @@ pub fn stream_to_chat_events(
 }
 
 /// Convert an `LlmError` to a `SynapseClientError`
-pub fn from_llm_error(e: synapse_llm::LlmError) -> SynapseClientError {
+pub fn from_llm_error(e: &synapse_llm::LlmError) -> SynapseClientError {
     SynapseClientError::Llm(e.to_string())
 }
