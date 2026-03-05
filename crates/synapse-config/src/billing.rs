@@ -328,10 +328,7 @@ mod tests {
             config.modality_feature_key("/v1/audio/transcriptions"),
             Some("stt_enabled")
         );
-        assert_eq!(
-            config.modality_feature_key("/v1/audio/speech"),
-            Some("tts_enabled")
-        );
+        assert_eq!(config.modality_feature_key("/v1/audio/speech"), Some("tts_enabled"));
         assert_eq!(
             config.modality_feature_key("/v1/embeddings"),
             Some("embeddings_enabled")
@@ -349,10 +346,7 @@ mod tests {
         assert_eq!(modality_display_name("stt_enabled"), "Speech-to-text");
         assert_eq!(modality_display_name("tts_enabled"), "Text-to-speech");
         assert_eq!(modality_display_name("embeddings_enabled"), "Embeddings");
-        assert_eq!(
-            modality_display_name("image_gen_enabled"),
-            "Image generation"
-        );
+        assert_eq!(modality_display_name("image_gen_enabled"), "Image generation");
         assert_eq!(modality_display_name("unknown_key"), "This feature");
     }
 }

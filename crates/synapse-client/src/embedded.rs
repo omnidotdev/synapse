@@ -135,9 +135,7 @@ pub fn from_completion_response(resp: llm::CompletionResponse) -> types::ChatRes
 
 /// Convert an internal `StreamEvent` stream to a client `ChatEvent` stream
 pub fn stream_to_chat_events(
-    stream: Pin<
-        Box<dyn Stream<Item = std::result::Result<llm::StreamEvent, synapse_llm::LlmError>> + Send>,
-    >,
+    stream: Pin<Box<dyn Stream<Item = std::result::Result<llm::StreamEvent, synapse_llm::LlmError>> + Send>>,
 ) -> Pin<Box<dyn Stream<Item = Result<types::ChatEvent>> + Send>> {
     let mapped = stream.filter_map(|result| async move {
         match result {

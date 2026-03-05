@@ -14,14 +14,14 @@ pub mod handler;
 pub mod health;
 pub mod protocol;
 pub mod provider;
-pub mod state;
 pub mod routing;
+pub mod state;
 pub mod types;
 
 pub use error::LlmError;
 #[cfg(feature = "http")]
 pub use handler::llm_router;
 pub use provider::{Provider, ProviderCapabilities};
-pub use state::LlmState;
 pub use routing::{ModelRouter, ResolvedModel};
+pub use state::LlmState;
 pub use types::{CompletionRequest, CompletionResponse, StreamEvent};

@@ -471,8 +471,8 @@ pub struct AnthropicStreamState {
     /// Sequential 0-based index of the tool call currently being streamed
     ///
     /// Anthropic's content block index is shared across all block types (text,
-    /// tool_use, …), so it cannot be used as the tool-call index — a tool use
-    /// that follows a text block would have content_block index 1+, creating
+    /// `tool_use`, …), so it cannot be used as the tool-call index — a tool use
+    /// that follows a text block would have `content_block` index 1+, creating
     /// phantom entries in consumers that index by this value.
     current_tool_call_index: u32,
     /// Counter used to assign the next tool call its sequential index

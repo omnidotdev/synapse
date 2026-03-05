@@ -352,7 +352,7 @@ impl ToolResult {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
+                ContentBlock::Image { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("\n")

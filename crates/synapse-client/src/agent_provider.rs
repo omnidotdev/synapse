@@ -10,9 +10,7 @@ use agent_core::provider::{CompletionEvent, CompletionRequest, CompletionStream,
 use agent_core::types::{Content, ContentBlock, Role, StopReason, Usage};
 
 use crate::client::SynapseClient;
-use crate::types::{
-    ChatEvent, ChatRequest, FunctionCall, FunctionDefinition, Message, ToolCall, ToolDefinition,
-};
+use crate::types::{ChatEvent, ChatRequest, FunctionCall, FunctionDefinition, Message, ToolCall, ToolDefinition};
 
 impl From<crate::McpTool> for agent_core::types::Tool {
     fn from(t: crate::McpTool) -> Self {
@@ -30,10 +28,7 @@ impl LlmProvider for SynapseClient {
         "synapse"
     }
 
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> agent_core::error::Result<CompletionStream> {
+    async fn stream(&self, request: CompletionRequest) -> agent_core::error::Result<CompletionStream> {
         let synapse_req = to_chat_request(&request);
 
         let stream = self
@@ -45,12 +40,10 @@ impl LlmProvider for SynapseClient {
             })?;
 
         let mapped = stream.map(|result| {
-            result
-                .map(to_completion_event)
-                .map_err(|e| AgentError::Api {
-                    status: 0,
-                    message: e.to_string(),
-                })
+            result.map(to_completion_event).map_err(|e| AgentError::Api {
+                status: 0,
+                message: e.to_string(),
+            })
         });
 
         Ok(Box::pin(mapped))
@@ -76,9 +69,7 @@ fn to_chat_request(req: &CompletionRequest) -> ChatRequest {
                     for block in blocks {
                         match block {
                             ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                ..
+                                tool_use_id, content, ..
                             } => {
                                 messages.push(Message::tool(tool_use_id, content));
                             }
@@ -128,11 +119,7 @@ fn to_chat_request(req: &CompletionRequest) -> ChatRequest {
                     messages.push(Message {
                         role: "assistant".to_owned(),
                         content: content_val,
-                        tool_calls: if tool_calls.is_empty() {
-                            None
-                        } else {
-                            Some(tool_calls)
-                        },
+                        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                         tool_call_id: None,
                     });
                 }
@@ -178,10 +165,7 @@ fn to_completion_event(event: ChatEvent) -> CompletionEvent {
             index: index as usize,
             partial_json: arguments,
         },
-        ChatEvent::Done {
-            finish_reason,
-            usage,
-        } => CompletionEvent::Done {
+        ChatEvent::Done { finish_reason, usage } => CompletionEvent::Done {
             stop_reason: finish_reason.map(|r| match r.as_str() {
                 "stop" => StopReason::EndTurn,
                 "tool_calls" => StopReason::ToolUse,

@@ -6,12 +6,12 @@
 //!
 //! Enable with the `onnx` feature flag
 
+use crate::RoutingDecision;
 use crate::analysis::QueryProfile;
 use crate::error::RoutingError;
 use crate::feedback::FeedbackTracker;
 use crate::registry::ModelRegistry;
 use crate::strategy::Strategy;
-use crate::RoutingDecision;
 
 /// Number of input features extracted from a `QueryProfile`
 #[cfg(feature = "onnx")]
@@ -80,34 +80,25 @@ impl Strategy for OnnxStrategy {
 
             // Extract features from the query profile
             let features = profile_to_features(_profile);
-            let input_array =
-                ndarray::Array2::from_shape_vec((1, NUM_FEATURES), features).map_err(|e| {
-                    RoutingError::AnalysisFailed(format!("failed to build input tensor: {e}"))
-                })?;
+            let input_array = ndarray::Array2::from_shape_vec((1, NUM_FEATURES), features)
+                .map_err(|e| RoutingError::AnalysisFailed(format!("failed to build input tensor: {e}")))?;
 
             // Run inference
             let outputs = self
                 .session
-                .run(ort::inputs![input_array].map_err(|e| {
-                    RoutingError::AnalysisFailed(format!("failed to prepare ONNX inputs: {e}"))
-                })?)
-                .map_err(|e| {
-                    RoutingError::AnalysisFailed(format!("ONNX inference failed: {e}"))
-                })?;
+                .run(
+                    ort::inputs![input_array]
+                        .map_err(|e| RoutingError::AnalysisFailed(format!("failed to prepare ONNX inputs: {e}")))?,
+                )
+                .map_err(|e| RoutingError::AnalysisFailed(format!("ONNX inference failed: {e}")))?;
 
             // Extract output probability tensor
             let output_tensor = outputs
                 .first()
-                .ok_or_else(|| {
-                    RoutingError::AnalysisFailed("ONNX model returned no outputs".to_owned())
-                })?
+                .ok_or_else(|| RoutingError::AnalysisFailed("ONNX model returned no outputs".to_owned()))?
                 .1
                 .try_extract_tensor::<f32>()
-                .map_err(|e| {
-                    RoutingError::AnalysisFailed(format!(
-                        "failed to extract output tensor: {e}"
-                    ))
-                })?;
+                .map_err(|e| RoutingError::AnalysisFailed(format!("failed to extract output tensor: {e}")))?;
 
             let probabilities: Vec<f32> = output_tensor.iter().copied().collect();
 
@@ -115,9 +106,7 @@ impl Strategy for OnnxStrategy {
                 Some(selected) => {
                     let alternatives = profiles
                         .iter()
-                        .filter(|p| {
-                            p.provider != selected.provider || p.model != selected.model
-                        })
+                        .filter(|p| p.provider != selected.provider || p.model != selected.model)
                         .map(|p| (p.provider.clone(), p.model.clone()))
                         .collect();
 
@@ -137,18 +126,13 @@ impl Strategy for OnnxStrategy {
                 }
                 None => {
                     // Fallback to best quality when ONNX selection fails
-                    tracing::warn!(
-                        "ONNX model selection failed, falling back to best quality"
-                    );
+                    tracing::warn!("ONNX model selection failed, falling back to best quality");
 
-                    let best =
-                        registry.best_quality().ok_or(RoutingError::NoProfiles)?;
+                    let best = registry.best_quality().ok_or(RoutingError::NoProfiles)?;
 
                     let alternatives = profiles
                         .iter()
-                        .filter(|p| {
-                            p.provider != best.provider || p.model != best.model
-                        })
+                        .filter(|p| p.provider != best.provider || p.model != best.model)
                         .map(|p| (p.provider.clone(), p.model.clone()))
                         .collect();
 
@@ -212,11 +196,7 @@ fn profile_to_features(profile: &QueryProfile) -> Vec<f32> {
         task_ordinal,
         complexity_ordinal,
         if profile.requires_tool_use { 1.0 } else { 0.0 },
-        if profile.required_capabilities.vision {
-            1.0
-        } else {
-            0.0
-        },
+        if profile.required_capabilities.vision { 1.0 } else { 0.0 },
         if profile.required_capabilities.long_context {
             1.0
         } else {
@@ -268,10 +248,7 @@ fn select_model_from_probabilities(
 
 /// Check whether a model profile satisfies the query's required capabilities
 #[cfg(feature = "onnx")]
-fn satisfies_capabilities(
-    profile: &crate::registry::ModelProfile,
-    query: &QueryProfile,
-) -> bool {
+fn satisfies_capabilities(profile: &crate::registry::ModelProfile, query: &QueryProfile) -> bool {
     let caps = &query.required_capabilities;
 
     if caps.tool_calling && !profile.tool_calling {

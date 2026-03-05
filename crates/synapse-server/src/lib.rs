@@ -33,7 +33,7 @@ impl Server {
     ///
     /// Returns an error if subsystem initialization (LLM, MCP, STT, TTS) or
     /// rate-limiter construction fails
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let listen_address = config
             .server
@@ -142,10 +142,7 @@ impl Server {
                     let engine = Arc::clone(&engine);
                     async move { guardrails::guardrails_middleware(engine, req, next).await }
                 }));
-                tracing::info!(
-                    rules = guardrails_config.rules.len(),
-                    "guardrails enabled"
-                );
+                tracing::info!(rules = guardrails_config.rules.len(), "guardrails enabled");
             }
         }
 
@@ -208,8 +205,7 @@ impl Server {
                 };
                 app = app.route(
                     "/webhooks/entitlements",
-                    axum::routing::post(webhook::entitlement_webhook_handler)
-                        .with_state(webhook_state),
+                    axum::routing::post(webhook::entitlement_webhook_handler).with_state(webhook_state),
                 );
             }
 
@@ -232,23 +228,23 @@ impl Server {
             )?;
 
             // Optionally construct VaultClient for BYOK key resolution from Gatekeeper
-            let vault_client: Option<Arc<synapse_auth::VaultClient>> =
-                if let Some(ref vault_config) = auth_config.vault {
-                    let client = synapse_auth::VaultClient::new(
-                        vault_config.url.clone(),
-                        vault_config.service_key.clone(),
-                        Some(std::time::Duration::from_secs(vault_config.cache_ttl_seconds)),
-                        Some(vault_config.cache_capacity),
-                    )?;
-                    tracing::info!(
-                        url = %vault_config.url,
-                        cache_ttl_secs = vault_config.cache_ttl_seconds,
-                        "vault client enabled for BYOK key resolution"
-                    );
-                    Some(Arc::new(client))
-                } else {
-                    None
-                };
+            let vault_client: Option<Arc<synapse_auth::VaultClient>> = if let Some(ref vault_config) = auth_config.vault
+            {
+                let client = synapse_auth::VaultClient::new(
+                    vault_config.url.clone(),
+                    vault_config.service_key.clone(),
+                    Some(std::time::Duration::from_secs(vault_config.cache_ttl_seconds)),
+                    Some(vault_config.cache_capacity),
+                )?;
+                tracing::info!(
+                    url = %vault_config.url,
+                    cache_ttl_secs = vault_config.cache_ttl_seconds,
+                    "vault client enabled for BYOK key resolution"
+                );
+                Some(Arc::new(client))
+            } else {
+                None
+            };
 
             // Cache invalidation endpoint
             let invalidate_state = invalidate::InvalidateState {
@@ -257,8 +253,7 @@ impl Server {
             };
             app = app.route(
                 "/internal/invalidate-key",
-                axum::routing::post(invalidate::invalidate_key_handler)
-                    .with_state(invalidate_state),
+                axum::routing::post(invalidate::invalidate_key_handler).with_state(invalidate_state),
             );
 
             let usage_reporter = synapse_auth::UsageReporter::spawn(
@@ -274,9 +269,7 @@ impl Server {
                 let vault = vault_client.clone();
                 let public_paths = public_paths.clone();
                 let reporter = reporter.clone();
-                async move {
-                    auth::auth_middleware(resolver, vault, public_paths, reporter, req, next).await
-                }
+                async move { auth::auth_middleware(resolver, vault, public_paths, reporter, req, next).await }
             }));
         }
 

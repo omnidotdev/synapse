@@ -86,10 +86,19 @@ impl ToolIndex {
             .map_err(|e| McpError::Internal(anyhow::anyhow!("search failed: {e}")))?;
 
         let field_err = |name| McpError::Internal(anyhow::anyhow!("missing schema field: {name}"));
-        let qualified_name_field = self.schema.get_field("qualified_name").map_err(|_| field_err("qualified_name"))?;
+        let qualified_name_field = self
+            .schema
+            .get_field("qualified_name")
+            .map_err(|_| field_err("qualified_name"))?;
         let tool_name_field = self.schema.get_field("tool_name").map_err(|_| field_err("tool_name"))?;
-        let description_field = self.schema.get_field("description").map_err(|_| field_err("description"))?;
-        let server_name_field = self.schema.get_field("server_name").map_err(|_| field_err("server_name"))?;
+        let description_field = self
+            .schema
+            .get_field("description")
+            .map_err(|_| field_err("description"))?;
+        let server_name_field = self
+            .schema
+            .get_field("server_name")
+            .map_err(|_| field_err("server_name"))?;
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {

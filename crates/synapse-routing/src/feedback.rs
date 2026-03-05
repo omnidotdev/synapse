@@ -53,9 +53,7 @@ pub struct FeedbackTracker {
 impl FeedbackTracker {
     /// Create a new feedback tracker
     pub fn new() -> Self {
-        Self {
-            models: DashMap::new(),
-        }
+        Self { models: DashMap::new() }
     }
 
     /// Record feedback for a completed request

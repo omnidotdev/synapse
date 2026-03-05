@@ -12,11 +12,7 @@ use crate::{
 #[async_trait]
 pub trait ImageGenProvider: Send + Sync {
     /// Generate images for the given request
-    async fn generate(
-        &self,
-        request: &ImageRequest,
-        context: &RequestContext,
-    ) -> Result<ImageResponse>;
+    async fn generate(&self, request: &ImageRequest, context: &RequestContext) -> Result<ImageResponse>;
 
     /// Get the provider name
     fn name(&self) -> &str;

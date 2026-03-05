@@ -214,11 +214,7 @@ impl ModelRouter {
     ///
     /// Given a "provider/model" pair and equivalence groups, returns
     /// alternative (provider, model) pairs excluding the original.
-    pub fn find_equivalents(
-        provider: &str,
-        model: &str,
-        groups: &[EquivalenceGroup],
-    ) -> Vec<(String, String)> {
+    pub fn find_equivalents(provider: &str, model: &str, groups: &[EquivalenceGroup]) -> Vec<(String, String)> {
         let key = format!("{provider}/{model}");
         let mut alternatives = Vec::new();
 

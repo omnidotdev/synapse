@@ -13,8 +13,7 @@ pub struct CacheLimiter {
 impl CacheLimiter {
     /// Create a new cache-backed rate limiter
     pub fn new(url: &str, max_requests: u32, window: Duration) -> Result<Self, RateLimitError> {
-        let client =
-            redis::Client::open(url).map_err(|e| RateLimitError::Cache(format!("failed to connect: {e}")))?;
+        let client = redis::Client::open(url).map_err(|e| RateLimitError::Cache(format!("failed to connect: {e}")))?;
 
         Ok(Self {
             client,

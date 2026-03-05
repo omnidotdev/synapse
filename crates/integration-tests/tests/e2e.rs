@@ -215,12 +215,7 @@ async fn models_lists_from_all_providers() {
     // Allow time for background model discovery
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    let resp = server
-        .client()
-        .get(server.url("/v1/models"))
-        .send()
-        .await
-        .unwrap();
+    let resp = server.client().get(server.url("/v1/models")).send().await.unwrap();
 
     assert_eq!(resp.status(), 200);
 
@@ -247,12 +242,7 @@ async fn unknown_endpoint_returns_404() {
 
     let server = TestServer::start(config).await.unwrap();
 
-    let resp = server
-        .client()
-        .get(server.url("/v1/nonexistent"))
-        .send()
-        .await
-        .unwrap();
+    let resp = server.client().get(server.url("/v1/nonexistent")).send().await.unwrap();
 
     assert_eq!(resp.status(), 404);
 }

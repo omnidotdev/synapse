@@ -13,9 +13,8 @@ use url::Url;
 
 use crate::error::{Result, SynapseClientError};
 use crate::types::{
-    ChatEvent, ChatRequest, ChatResponse, EmbedRequest, EmbeddingResponse, ImageRequest,
-    ImageResponse, McpTool, Model, ModelList, SpeechRequest, StreamChunk, ToolResult,
-    ToolSearchResult, Transcription,
+    ChatEvent, ChatRequest, ChatResponse, EmbedRequest, EmbeddingResponse, ImageRequest, ImageResponse, McpTool, Model,
+    ModelList, SpeechRequest, StreamChunk, ToolResult, ToolSearchResult, Transcription,
 };
 
 /// Backend mode for the Synapse client
@@ -87,8 +86,8 @@ impl SynapseClient {
     ///
     /// Returns an error if the URL is invalid
     pub fn new(base_url: &str) -> Result<Self> {
-        let base_url = Url::parse(base_url)
-            .map_err(|e| SynapseClientError::Config(format!("invalid base URL: {e}")))?;
+        let base_url =
+            Url::parse(base_url).map_err(|e| SynapseClientError::Config(format!("invalid base URL: {e}")))?;
 
         Ok(Self {
             backend: Backend::Remote {
@@ -103,10 +102,7 @@ impl SynapseClient {
     #[must_use]
     pub fn with_api_key(mut self, api_key: String) -> Self {
         match &mut self.backend {
-            Backend::Remote {
-                api_key: key,
-                ..
-            } => *key = Some(api_key),
+            Backend::Remote { api_key: key, .. } => *key = Some(api_key),
             #[cfg(feature = "embedded")]
             Backend::Embedded { .. } => {}
         }
@@ -265,12 +261,7 @@ impl SynapseClient {
     /// # Errors
     ///
     /// Returns an error if the request fails
-    pub async fn transcribe(
-        &self,
-        audio: Bytes,
-        filename: &str,
-        model: &str,
-    ) -> Result<Transcription> {
+    pub async fn transcribe(&self, audio: Bytes, filename: &str, model: &str) -> Result<Transcription> {
         match &self.backend {
             Backend::Remote {
                 base_url,
@@ -282,9 +273,7 @@ impl SynapseClient {
                 let part = reqwest::multipart::Part::bytes(audio.to_vec())
                     .file_name(filename.to_owned())
                     .mime_str("audio/wav")
-                    .map_err(|e| {
-                        SynapseClientError::Config(format!("invalid mime type: {e}"))
-                    })?;
+                    .map_err(|e| SynapseClientError::Config(format!("invalid mime type: {e}")))?;
 
                 let form = reqwest::multipart::Form::new()
                     .text("model", model.to_owned())
@@ -295,17 +284,13 @@ impl SynapseClient {
                     .send()
                     .await?;
 
-                handle_error(response)
-                    .await?
-                    .json()
-                    .await
-                    .map_err(Into::into)
+                handle_error(response).await?.json().await.map_err(Into::into)
             }
             #[cfg(feature = "embedded")]
             Backend::Embedded { stt_server, .. } => {
-                let server = stt_server.as_ref().ok_or(SynapseClientError::Config(
-                    "no STT provider configured".to_owned(),
-                ))?;
+                let server = stt_server
+                    .as_ref()
+                    .ok_or(SynapseClientError::Config("no STT provider configured".to_owned()))?;
 
                 let req = stt::TranscriptionRequest {
                     audio: audio.to_vec(),
@@ -363,9 +348,9 @@ impl SynapseClient {
             }
             #[cfg(feature = "embedded")]
             Backend::Embedded { tts_server, .. } => {
-                let server = tts_server.as_ref().ok_or(SynapseClientError::Config(
-                    "no TTS provider configured".to_owned(),
-                ))?;
+                let server = tts_server
+                    .as_ref()
+                    .ok_or(SynapseClientError::Config("no TTS provider configured".to_owned()))?;
 
                 let tts_req = tts::SpeechRequest {
                     model: req.model.clone(),
@@ -438,11 +423,7 @@ impl SynapseClient {
     /// # Errors
     ///
     /// Returns an error if the request fails
-    pub async fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<ToolResult> {
+    pub async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<ToolResult> {
         match &self.backend {
             Backend::Remote {
                 base_url,
@@ -461,11 +442,7 @@ impl SynapseClient {
                     .send()
                     .await?;
 
-                handle_error(response)
-                    .await?
-                    .json()
-                    .await
-                    .map_err(Into::into)
+                handle_error(response).await?.json().await.map_err(Into::into)
             }
             #[cfg(feature = "embedded")]
             Backend::Embedded { .. } => Err(SynapseClientError::Config(
@@ -479,11 +456,7 @@ impl SynapseClient {
     /// # Errors
     ///
     /// Returns an error if the request fails
-    pub async fn search_tools(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<ToolSearchResult>> {
+    pub async fn search_tools(&self, query: &str, limit: Option<usize>) -> Result<Vec<ToolSearchResult>> {
         match &self.backend {
             Backend::Remote {
                 base_url,
@@ -498,8 +471,7 @@ impl SynapseClient {
                 let mut url = make_url(base_url, "/mcp/search");
                 url.query_pairs_mut().append_pair("q", query);
                 if let Some(limit) = limit {
-                    url.query_pairs_mut()
-                        .append_pair("limit", &limit.to_string());
+                    url.query_pairs_mut().append_pair("limit", &limit.to_string());
                 }
 
                 let response = make_request(http, reqwest::Method::GET, &url, api_key.as_deref())
@@ -533,11 +505,7 @@ impl SynapseClient {
                     .send()
                     .await?;
 
-                handle_error(response)
-                    .await?
-                    .json()
-                    .await
-                    .map_err(Into::into)
+                handle_error(response).await?.json().await.map_err(Into::into)
             }
             #[cfg(feature = "embedded")]
             Backend::Embedded { .. } => Err(SynapseClientError::Config(
@@ -563,11 +531,7 @@ impl SynapseClient {
                     .send()
                     .await?;
 
-                handle_error(response)
-                    .await?
-                    .json()
-                    .await
-                    .map_err(Into::into)
+                handle_error(response).await?.json().await.map_err(Into::into)
             }
             #[cfg(feature = "embedded")]
             Backend::Embedded { .. } => Err(SynapseClientError::Config(
@@ -589,21 +553,13 @@ impl SynapseClient {
     /// Returns an error if the LLM providers fail to initialize
     pub async fn embedded(config: synapse_config::Config) -> Result<Self> {
         // Build STT/TTS servers before moving config.llm
-        let stt_server = stt::SttServerBuilder::new(&config)
-            .build()
-            .ok()
-            .map(Arc::new);
+        let stt_server = stt::SttServerBuilder::new(&config).build().ok().map(Arc::new);
 
-        let tts_server = tts::TtsServerBuilder::new(&config)
-            .build()
-            .ok()
-            .map(Arc::new);
+        let tts_server = tts::TtsServerBuilder::new(&config).build().ok().map(Arc::new);
 
         let state = synapse_llm::LlmState::from_config(config.llm)
             .await
-            .map_err(|e| {
-                SynapseClientError::Config(format!("failed to initialize LLM state: {e}"))
-            })?;
+            .map_err(|e| SynapseClientError::Config(format!("failed to initialize LLM state: {e}")))?;
 
         Ok(Self {
             backend: Backend::Embedded {
@@ -664,14 +620,8 @@ fn parse_error_body(body: &str) -> (String, String) {
         |_| ("unknown".to_owned(), body.to_owned()),
         |json| {
             let error = &json["error"];
-            let error_type = error["type"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_owned();
-            let message = error["message"]
-                .as_str()
-                .unwrap_or(body)
-                .to_owned();
+            let error_type = error["type"].as_str().unwrap_or("unknown").to_owned();
+            let message = error["message"].as_str().unwrap_or(body).to_owned();
             (error_type, message)
         },
     )
@@ -714,36 +664,33 @@ where
     // Usage may arrive in a separate chunk before the finish chunk, so
     // accumulate it and attach to the final Done event.
     line_stream
-        .scan(
-            None::<crate::types::Usage>,
-            |accumulated_usage, result| {
-                let events = match result {
-                    Err(e) => vec![Err(e)],
-                    Ok(data) => {
-                        if data == "[DONE]" {
-                            return std::future::ready(Some(vec![Ok(ChatEvent::Done {
-                                finish_reason: None,
-                                usage: accumulated_usage.take(),
-                            })]));
-                        }
-
-                        match serde_json::from_str::<StreamChunk>(&data) {
-                            Ok(chunk) => {
-                                // Store usage from any chunk (including usage-only chunks)
-                                if let Some(ref usage) = chunk.usage {
-                                    *accumulated_usage = Some(usage.clone());
-                                }
-                                chunk_to_events(chunk, accumulated_usage)
-                            }
-                            Err(e) => vec![Err(SynapseClientError::Parse(format!(
-                                "failed to parse stream chunk: {e}"
-                            )))],
-                        }
+        .scan(None::<crate::types::Usage>, |accumulated_usage, result| {
+            let events = match result {
+                Err(e) => vec![Err(e)],
+                Ok(data) => {
+                    if data == "[DONE]" {
+                        return std::future::ready(Some(vec![Ok(ChatEvent::Done {
+                            finish_reason: None,
+                            usage: accumulated_usage.take(),
+                        })]));
                     }
-                };
-                std::future::ready(Some(events))
-            },
-        )
+
+                    match serde_json::from_str::<StreamChunk>(&data) {
+                        Ok(chunk) => {
+                            // Store usage from any chunk (including usage-only chunks)
+                            if let Some(ref usage) = chunk.usage {
+                                *accumulated_usage = Some(usage.clone());
+                            }
+                            chunk_to_events(chunk, accumulated_usage)
+                        }
+                        Err(e) => vec![Err(SynapseClientError::Parse(format!(
+                            "failed to parse stream chunk: {e}"
+                        )))],
+                    }
+                }
+            };
+            std::future::ready(Some(events))
+        })
         .flat_map(stream::iter)
 }
 
@@ -754,10 +701,7 @@ where
 ///
 /// `accumulated_usage` is consumed when a `Done` event is emitted, attaching
 /// the usage data that may have arrived in an earlier chunk.
-fn chunk_to_events(
-    chunk: StreamChunk,
-    accumulated_usage: &mut Option<crate::types::Usage>,
-) -> Vec<Result<ChatEvent>> {
+fn chunk_to_events(chunk: StreamChunk, accumulated_usage: &mut Option<crate::types::Usage>) -> Vec<Result<ChatEvent>> {
     let Some(choice) = chunk.choices.into_iter().next() else {
         // Usage-only chunks have no choices — usage is already stored by the
         // caller, so there is nothing to emit here.

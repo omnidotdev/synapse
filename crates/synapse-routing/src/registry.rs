@@ -106,9 +106,7 @@ impl ModelRegistry {
 
     /// Get the cheapest model above a quality floor
     pub fn cheapest_above_quality(&self, quality_floor: f64) -> Option<&ModelProfile> {
-        self.by_cost()
-            .into_iter()
-            .find(|p| p.quality >= quality_floor)
+        self.by_cost().into_iter().find(|p| p.quality >= quality_floor)
     }
 
     /// Get the highest quality model

@@ -10,15 +10,10 @@ use http::StatusCode;
 use synapse_guardrails::GuardrailEngine;
 
 /// Check request body content against guardrails
-pub async fn guardrails_middleware(
-    engine: Arc<GuardrailEngine>,
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn guardrails_middleware(engine: Arc<GuardrailEngine>, request: Request, next: Next) -> Response {
     // Only check LLM completion endpoints
     let path = request.uri().path();
-    let is_llm_endpoint =
-        path == "/v1/chat/completions" || path == "/v1/messages";
+    let is_llm_endpoint = path == "/v1/chat/completions" || path == "/v1/messages";
 
     if !is_llm_endpoint {
         return next.run(request).await;
@@ -26,20 +21,17 @@ pub async fn guardrails_middleware(
 
     // Buffer the request body for inspection
     let (parts, body) = request.into_parts();
-    let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "message": "request body too large for guardrail inspection",
-                        "type": "invalid_request_error"
-                    }
-                })),
-            )
-                .into_response();
-        }
+    let Ok(bytes) = axum::body::to_bytes(body, 10 * 1024 * 1024).await else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "message": "request body too large for guardrail inspection",
+                    "type": "invalid_request_error"
+                }
+            })),
+        )
+            .into_response();
     };
 
     // Extract text content from the request for inspection

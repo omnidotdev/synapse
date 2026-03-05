@@ -39,9 +39,7 @@ impl OpenAiImageGenProvider {
     /// Model names arrive as "openai/dall-e-3"; the upstream
     /// API expects just "dall-e-3"
     fn strip_model_prefix(model: &str) -> &str {
-        model
-            .split_once('/')
-            .map_or(model, |(_, model_name)| model_name)
+        model.split_once('/').map_or(model, |(_, model_name)| model_name)
     }
 }
 
@@ -74,15 +72,8 @@ struct OpenAiImageData {
 
 #[async_trait]
 impl ImageGenProvider for OpenAiImageGenProvider {
-    async fn generate(
-        &self,
-        request: &ImageRequest,
-        _context: &RequestContext,
-    ) -> Result<ImageResponse> {
-        let url = format!(
-            "{}/images/generations",
-            self.base_url.trim_end_matches('/')
-        );
+    async fn generate(&self, request: &ImageRequest, _context: &RequestContext) -> Result<ImageResponse> {
+        let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
         let model = Self::strip_model_prefix(&request.model).to_string();
 
         let wire_request = OpenAiImageRequest {
@@ -104,27 +95,19 @@ impl ImageGenProvider for OpenAiImageGenProvider {
         let response = self
             .client
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
+            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
             .json(&wire_request)
             .send()
             .await
             .map_err(|e| {
                 tracing::error!(provider = %self.name, error = %e, "image generation request failed");
-                ImageGenError::ConnectionError(format!(
-                    "Failed to send request to OpenAI image generation: {e}"
-                ))
+                ImageGenError::ConnectionError(format!("Failed to send request to OpenAI image generation: {e}"))
             })?;
 
         let status = response.status();
 
         if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
 
             tracing::error!(
                 provider = %self.name,
@@ -142,15 +125,14 @@ impl ImageGenProvider for OpenAiImageGenProvider {
             });
         }
 
-        let wire_response: OpenAiImageResponse =
-            response.json().await.map_err(|e| {
-                tracing::error!(
-                    provider = %self.name,
-                    error = %e,
-                    "failed to parse OpenAI image generation response"
-                );
-                ImageGenError::InternalError(None)
-            })?;
+        let wire_response: OpenAiImageResponse = response.json().await.map_err(|e| {
+            tracing::error!(
+                provider = %self.name,
+                error = %e,
+                "failed to parse OpenAI image generation response"
+            );
+            ImageGenError::InternalError(None)
+        })?;
 
         tracing::debug!(provider = %self.name, "image generation request complete");
 

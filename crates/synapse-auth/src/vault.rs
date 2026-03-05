@@ -83,9 +83,7 @@ impl VaultClient {
         cache_ttl: Option<Duration>,
         cache_capacity: Option<u64>,
     ) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()?;
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
 
         let cache = Cache::builder()
             .time_to_live(cache_ttl.unwrap_or(DEFAULT_CACHE_TTL))
@@ -109,11 +107,7 @@ impl VaultClient {
     ///
     /// Returns `VaultError` on network failures, auth issues, or
     /// unexpected API responses
-    pub async fn resolve(
-        &self,
-        user_id: &str,
-        provider: &str,
-    ) -> Result<Option<Arc<VaultKey>>, VaultError> {
+    pub async fn resolve(&self, user_id: &str, provider: &str) -> Result<Option<Arc<VaultKey>>, VaultError> {
         let cache_key = format!("{user_id}:{provider}");
 
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -147,8 +141,7 @@ impl VaultClient {
             _ => {}
         }
 
-        let body: VaultResolveResponse =
-            response.json().await.map_err(|e| VaultError::Parse(e.to_string()))?;
+        let body: VaultResolveResponse = response.json().await.map_err(|e| VaultError::Parse(e.to_string()))?;
 
         let vault_key = Arc::new(VaultKey {
             provider: body.provider,

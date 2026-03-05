@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use axum::Json;
 use http::{HeaderMap, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -25,9 +25,7 @@ pub async fn invalidate_key_handler(
     headers: HeaderMap,
     Json(body): Json<InvalidateBody>,
 ) -> impl IntoResponse {
-    let secret = headers
-        .get("x-gateway-secret")
-        .and_then(|v| v.to_str().ok());
+    let secret = headers.get("x-gateway-secret").and_then(|v| v.to_str().ok());
 
     if secret != Some(state.gateway_secret.expose_secret()) {
         return StatusCode::UNAUTHORIZED;

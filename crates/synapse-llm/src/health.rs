@@ -113,11 +113,7 @@ impl ProviderHealthTracker {
             if count >= self.config.error_threshold {
                 health.opened_at.store(now, Ordering::Relaxed);
                 drop(health);
-                tracing::warn!(
-                    provider,
-                    error_count = count,
-                    "circuit breaker opened for provider"
-                );
+                tracing::warn!(provider, error_count = count, "circuit breaker opened for provider");
             }
         }
     }

@@ -46,8 +46,7 @@ impl ResponseCache {
     ///
     /// Returns an error if the Valkey URL is invalid
     pub fn new(url: &str, default_ttl: Duration, key_prefix: Option<String>) -> Result<Self, CacheError> {
-        let client =
-            redis::Client::open(url).map_err(|e| CacheError::Backend(format!("invalid URL: {e}")))?;
+        let client = redis::Client::open(url).map_err(|e| CacheError::Backend(format!("invalid URL: {e}")))?;
 
         Ok(Self {
             client,
@@ -77,8 +76,8 @@ impl ResponseCache {
             .map_err(|e| CacheError::Backend(format!("GET failed: {e}")))?;
 
         if let Some(data) = result {
-            let entry: CachedResponse = serde_json::from_str(&data)
-                .map_err(|e| CacheError::Serialization(format!("deserialize: {e}")))?;
+            let entry: CachedResponse =
+                serde_json::from_str(&data).map_err(|e| CacheError::Serialization(format!("deserialize: {e}")))?;
             tracing::debug!(cache_key, "cache hit");
             Ok(Some(entry))
         } else {
@@ -92,12 +91,7 @@ impl ResponseCache {
     /// # Errors
     ///
     /// Returns an error on connection or serialization failure
-    pub async fn put(
-        &self,
-        cache_key: &str,
-        entry: &CachedResponse,
-        ttl: Option<Duration>,
-    ) -> Result<(), CacheError> {
+    pub async fn put(&self, cache_key: &str, entry: &CachedResponse, ttl: Option<Duration>) -> Result<(), CacheError> {
         use redis::AsyncCommands;
 
         let mut conn = self
@@ -107,8 +101,7 @@ impl ResponseCache {
             .map_err(|e| CacheError::Backend(format!("connection failed: {e}")))?;
 
         let key = format!("{}:{cache_key}", self.key_prefix);
-        let data =
-            serde_json::to_string(entry).map_err(|e| CacheError::Serialization(format!("serialize: {e}")))?;
+        let data = serde_json::to_string(entry).map_err(|e| CacheError::Serialization(format!("serialize: {e}")))?;
 
         let ttl_secs = ttl.unwrap_or(self.default_ttl).as_secs();
         let _: () = conn

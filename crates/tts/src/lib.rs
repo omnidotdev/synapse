@@ -12,10 +12,10 @@ use std::sync::Arc;
 use axum::{Router, extract::State, routing::post};
 
 pub use error::{Result, TtsError};
+use request::ExtractPayload;
 pub use request::RequestContext;
 pub use server::{Server, TtsServerBuilder};
 pub use types::{SpeechRequest, SpeechResponse};
-use request::ExtractPayload;
 
 /// Build the TTS server from configuration
 pub fn build_server(config: &synapse_config::Config) -> anyhow::Result<Arc<Server>> {

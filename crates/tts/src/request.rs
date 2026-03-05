@@ -61,7 +61,7 @@ where
 
         let bytes = axum::body::to_bytes(body, BODY_LIMIT_BYTES).await.map_err(|err| {
             if std::error::Error::source(&err)
-                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+                .is_some_and(<dyn std::error::Error + 'static>::is::<http_body_util::LengthLimitError>)
             {
                 (
                     axum::http::StatusCode::PAYLOAD_TOO_LARGE,

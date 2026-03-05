@@ -49,9 +49,12 @@ pub fn route(
 
             let cost_score = 1.0 - cost / max_cost;
             let latency_score = 1.0 - latency / max_latency;
-            let raw = config
-                .weight_quality
-                .mul_add(p.quality, config.weight_cost.mul_add(cost_score, config.weight_latency * latency_score));
+            let raw = config.weight_quality.mul_add(
+                p.quality,
+                config
+                    .weight_cost
+                    .mul_add(cost_score, config.weight_latency * latency_score),
+            );
 
             // Apply error penalty from feedback
             let error_rate = feedback.map_or(0.0, |f| {
@@ -88,10 +91,7 @@ pub fn route(
 }
 
 /// Resolve latency for a model from feedback, profile, or default
-fn resolve_latency(
-    profile: &crate::registry::ModelProfile,
-    feedback: Option<&FeedbackTracker>,
-) -> f64 {
+fn resolve_latency(profile: &crate::registry::ModelProfile, feedback: Option<&FeedbackTracker>) -> f64 {
     // Prefer live feedback data
     if let Some(tracker) = feedback {
         let snap = tracker.snapshot(&profile.provider, &profile.model);

@@ -5,7 +5,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use synapse_billing::AetherClient;
-use synapse_config::{modality_display_name, BillingConfig, FailMode};
+use synapse_config::{BillingConfig, FailMode, modality_display_name};
 use synapse_core::BillingIdentity;
 
 use crate::entitlement_cache::{CachedEntitlement, CachedUsageCheck, EntitlementCache};

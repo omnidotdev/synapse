@@ -25,15 +25,12 @@ impl Server {
         context: &RequestContext,
     ) -> crate::error::Result<ImageResponse> {
         // Extract provider name from model (format: "provider/model")
-        let (provider_name, _model_name) =
-            request.model.split_once('/').unwrap_or(("", &request.model));
+        let (provider_name, _model_name) = request.model.split_once('/').unwrap_or(("", &request.model));
 
         let provider = if provider_name.is_empty() {
             // If no provider prefix, use the first provider
             self.providers.first().ok_or_else(|| {
-                ImageGenError::ProviderNotFound(
-                    "No image generation providers configured".to_string(),
-                )
+                ImageGenError::ProviderNotFound("No image generation providers configured".to_string())
             })?
         } else {
             self.providers
@@ -90,13 +87,9 @@ impl<'a> ImageGenServerBuilder<'a> {
     }
 }
 
-fn resolve_api_key(
-    name: &str,
-    config: &ImageGenProviderConfig,
-) -> crate::error::Result<SecretString> {
-    config.api_key.clone().ok_or_else(|| {
-        ImageGenError::ConfigError(format!(
-            "API key required for image generation provider '{name}'"
-        ))
-    })
+fn resolve_api_key(name: &str, config: &ImageGenProviderConfig) -> crate::error::Result<SecretString> {
+    config
+        .api_key
+        .clone()
+        .ok_or_else(|| ImageGenError::ConfigError(format!("API key required for image generation provider '{name}'")))
 }

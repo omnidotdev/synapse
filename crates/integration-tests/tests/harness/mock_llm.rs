@@ -324,10 +324,7 @@ async fn handle_chat_completions(
         return build_streaming_response(&state, &req).into_response();
     }
 
-    let content = state
-        .response_content
-        .as_deref()
-        .unwrap_or("Hello from mock LLM");
+    let content = state.response_content.as_deref().unwrap_or("Hello from mock LLM");
 
     // If tools were provided, simulate a tool call
     let (content, tool_calls, finish_reason) = if req.tools.is_some() {

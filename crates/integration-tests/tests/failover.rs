@@ -22,10 +22,7 @@ async fn primary_succeeds_no_failover() {
         .with_openai_provider("backup", &backup.base_url())
         .with_failover(vec![EquivalenceGroup {
             name: "test".to_owned(),
-            models: vec![
-                "primary/mock-model-1".to_owned(),
-                "backup/mock-model-1".to_owned(),
-            ],
+            models: vec!["primary/mock-model-1".to_owned(), "backup/mock-model-1".to_owned()],
         }])
         .build();
 
@@ -60,10 +57,7 @@ async fn primary_fails_failover_to_backup() {
         .with_openai_provider("backup", &backup.base_url())
         .with_failover(vec![EquivalenceGroup {
             name: "test".to_owned(),
-            models: vec![
-                "primary/mock-model-1".to_owned(),
-                "backup/mock-model-1".to_owned(),
-            ],
+            models: vec!["primary/mock-model-1".to_owned(), "backup/mock-model-1".to_owned()],
         }])
         .build();
 
@@ -96,10 +90,7 @@ async fn non_retryable_error_no_failover() {
         .with_openai_provider("backup", &backup.base_url())
         .with_failover(vec![EquivalenceGroup {
             name: "test".to_owned(),
-            models: vec![
-                "nonexistent/model".to_owned(),
-                "backup/mock-model-1".to_owned(),
-            ],
+            models: vec!["nonexistent/model".to_owned(), "backup/mock-model-1".to_owned()],
         }])
         .build();
 
@@ -128,10 +119,7 @@ async fn all_providers_fail_returns_error() {
         .with_openai_provider("backup", &backup.base_url())
         .with_failover(vec![EquivalenceGroup {
             name: "test".to_owned(),
-            models: vec![
-                "primary/mock-model-1".to_owned(),
-                "backup/mock-model-1".to_owned(),
-            ],
+            models: vec!["primary/mock-model-1".to_owned(), "backup/mock-model-1".to_owned()],
         }])
         .build();
 

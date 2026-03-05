@@ -129,9 +129,11 @@ pub fn route_with_strategy_registry(
     }
 
     let strategy_name = StrategyRegistry::resolve_name(config);
-    let strategy = strategy_registry.get(strategy_name).ok_or_else(|| RoutingError::NoModelAvailable {
-        class: format!("unknown strategy: {strategy_name}"),
-    })?;
+    let strategy = strategy_registry
+        .get(strategy_name)
+        .ok_or_else(|| RoutingError::NoModelAvailable {
+            class: format!("unknown strategy: {strategy_name}"),
+        })?;
 
     let decision = strategy.route(&profile, &filtered, feedback)?;
 

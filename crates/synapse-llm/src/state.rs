@@ -58,6 +58,7 @@ impl LlmState {
     /// # Errors
     ///
     /// Returns an error if model resolution or all provider attempts fail
+    #[allow(clippy::cognitive_complexity)]
     pub async fn complete(
         &self,
         request: CompletionRequest,
@@ -71,10 +72,8 @@ impl LlmState {
                 match cache.get(&key).await {
                     Ok(Some(cached)) => {
                         tracing::info!("serving cached response");
-                        let response: CompletionResponse =
-                            serde_json::from_str(&cached.body).map_err(|e| {
-                                LlmError::Internal(anyhow::anyhow!("cache deserialization: {e}"))
-                            })?;
+                        let response: CompletionResponse = serde_json::from_str(&cached.body)
+                            .map_err(|e| LlmError::Internal(anyhow::anyhow!("cache deserialization: {e}")))?;
                         return Ok(response);
                     }
                     Ok(None) => {}
@@ -148,18 +147,17 @@ impl LlmState {
 
         // Store successful response in cache
         #[cfg(feature = "cache")]
-        if let Some(ref key) = cache_key {
-            if let Some(ref cache) = self.inner.response_cache {
-                if let Ok(body) = serde_json::to_string(&response) {
-                    let entry = synapse_cache::CachedResponse {
-                        body,
-                        model: model_id.clone(),
-                        provider: provider_name.clone(),
-                    };
-                    if let Err(e) = cache.put(key, &entry, None).await {
-                        tracing::warn!(error = %e, "failed to cache response");
-                    }
-                }
+        if let Some(ref key) = cache_key
+            && let Some(ref cache) = self.inner.response_cache
+            && let Ok(body) = serde_json::to_string(&response)
+        {
+            let entry = synapse_cache::CachedResponse {
+                body,
+                model: model_id.clone(),
+                provider: provider_name.clone(),
+            };
+            if let Err(e) = cache.put(key, &entry, None).await {
+                tracing::warn!(error = %e, "failed to cache response");
             }
         }
 
@@ -176,8 +174,13 @@ impl LlmState {
         &self,
         request: CompletionRequest,
         mut context: RequestContext,
-    ) -> Result<(String, Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>), LlmError>
-    {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
+        ),
+        LlmError,
+    > {
         let original_model = request.model.clone();
         let (provider_name, model_id, provider, explicit_provider) =
             self.resolve_provider(&request.model, &request).await?;
@@ -198,14 +201,8 @@ impl LlmState {
         // provider — surface the error instead of silently routing to a
         // different model
         let (actual_model, stream) = if explicit_provider {
-            self.complete_stream_direct(
-                &request,
-                &context,
-                &provider_name,
-                &model_id,
-                &provider,
-            )
-            .await?
+            self.complete_stream_direct(&request, &context, &provider_name, &model_id, &provider)
+                .await?
         } else if self.is_cascade_strategy(&original_model) {
             self.complete_stream_with_cascade(
                 &request,
@@ -217,14 +214,8 @@ impl LlmState {
             )
             .await?
         } else {
-            self.complete_stream_with_failover(
-                &request,
-                &context,
-                &provider_name,
-                &model_id,
-                &provider,
-            )
-            .await?
+            self.complete_stream_with_failover(&request, &context, &provider_name, &model_id, &provider)
+                .await?
         };
 
         // Wrap stream to intercept usage events for billing
@@ -343,13 +334,8 @@ impl LlmState {
     /// # Panics
     ///
     /// Panics if called after the inner `Arc` has been cloned
-    pub fn set_managed_providers(
-        &mut self,
-        keys: HashMap<String, SecretString>,
-        margins: HashMap<String, f64>,
-    ) {
-        let inner = Arc::get_mut(&mut self.inner)
-            .expect("set_managed_providers must be called before state is shared");
+    pub fn set_managed_providers(&mut self, keys: HashMap<String, SecretString>, margins: HashMap<String, f64>) {
+        let inner = Arc::get_mut(&mut self.inner).expect("set_managed_providers must be called before state is shared");
         inner.managed_keys = keys;
         inner.managed_margins = margins;
     }
@@ -425,7 +411,12 @@ impl LlmState {
             .ok_or_else(|| LlmError::ProviderNotFound {
                 provider: resolved.provider_name.clone(),
             })?;
-        Ok((resolved.provider_name.clone(), resolved.model_id, Arc::clone(provider), resolved.explicit_provider))
+        Ok((
+            resolved.provider_name.clone(),
+            resolved.model_id,
+            Arc::clone(provider),
+            resolved.explicit_provider,
+        ))
     }
 
     /// Resolve a virtual model name via the smart routing system
@@ -590,7 +581,13 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<(String, Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>), LlmError> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
+        ),
+        LlmError,
+    > {
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
 
@@ -679,11 +676,8 @@ impl LlmState {
                     "primary provider failed, attempting failover"
                 );
 
-                let alternatives = ModelRouter::find_equivalents(
-                    provider_name,
-                    model_id,
-                    &self.inner.failover.equivalence_groups,
-                );
+                let alternatives =
+                    ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups);
 
                 // max_attempts includes the primary, so remaining = max_attempts - 1
                 let remaining = self.inner.failover.max_attempts.saturating_sub(1);
@@ -745,7 +739,13 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<(String, Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>), LlmError> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
+        ),
+        LlmError,
+    > {
         // Try primary provider
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
@@ -787,11 +787,8 @@ impl LlmState {
                     "primary provider streaming failed, attempting failover"
                 );
 
-                let alternatives = ModelRouter::find_equivalents(
-                    provider_name,
-                    model_id,
-                    &self.inner.failover.equivalence_groups,
-                );
+                let alternatives =
+                    ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups);
 
                 let remaining = self.inner.failover.max_attempts.saturating_sub(1);
                 let mut last_error = e;
@@ -844,7 +841,13 @@ impl LlmState {
         model_id: &str,
         provider: &Arc<dyn Provider>,
         cascade_config: &synapse_config::CascadeConfig,
-    ) -> Result<(String, Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>), LlmError> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
+        ),
+        LlmError,
+    > {
         // Get the escalation model from the routing decision's alternatives
         let escalation = self.resolve_escalation_model(cascade_config)?;
 
@@ -921,11 +924,7 @@ impl LlmState {
         }
 
         // Estimate input tokens for confidence check
-        let query_tokens: usize = request
-            .messages
-            .iter()
-            .map(|m| m.content.as_text().len() / 4)
-            .sum();
+        let query_tokens: usize = request.messages.iter().map(|m| m.content.as_text().len() / 4).sum();
 
         // Evaluate confidence on buffered response
         let is_confident = synapse_routing::strategy::cascade::evaluate_buffered_response(
@@ -997,11 +996,7 @@ impl LlmState {
     ///
     /// Returns `LlmError::InvalidRequest` when a BYOK user has no key
     /// registered for the target provider
-    fn resolve_api_key_for_request(
-        &self,
-        context: &mut RequestContext,
-        provider_name: &str,
-    ) -> Result<(), LlmError> {
+    fn resolve_api_key_for_request(&self, context: &mut RequestContext, provider_name: &str) -> Result<(), LlmError> {
         use synapse_core::BillingMode;
 
         let Some(ref identity) = context.billing_identity else {
@@ -1057,11 +1052,7 @@ impl LlmState {
         }
 
         // Estimate input tokens from message content
-        let estimated_input: usize = request
-            .messages
-            .iter()
-            .map(|m| m.content.as_text().len() / 4)
-            .sum();
+        let estimated_input: usize = request.messages.iter().map(|m| m.content.as_text().len() / 4).sum();
 
         // Estimate output tokens conservatively (use max_tokens if set, else default)
         let estimated_output = request.params.max_tokens.unwrap_or(1024) as usize;
@@ -1072,12 +1063,7 @@ impl LlmState {
             .find(provider_name, &request.model)
             .map_or(0.0, |profile| {
                 let base = profile.estimate_cost(estimated_input, estimated_output);
-                let margin = self
-                    .inner
-                    .managed_margins
-                    .get(provider_name)
-                    .copied()
-                    .unwrap_or(1.0);
+                let margin = self.inner.managed_margins.get(provider_name).copied().unwrap_or(1.0);
                 base * margin
             });
 
@@ -1085,11 +1071,7 @@ impl LlmState {
     }
 
     /// Check if the user has sufficient credits for the estimated cost
-    async fn check_credits(
-        &self,
-        context: &RequestContext,
-        estimated_cost: f64,
-    ) -> Result<(), LlmError> {
+    async fn check_credits(&self, context: &RequestContext, estimated_cost: f64) -> Result<(), LlmError> {
         let Some(ref client) = self.inner.billing_client else {
             return Ok(());
         };
@@ -1152,12 +1134,7 @@ impl LlmState {
             .find(provider_name, model_id)
             .map_or(0.0, |profile| {
                 let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-                let margin = self
-                    .inner
-                    .managed_margins
-                    .get(provider_name)
-                    .copied()
-                    .unwrap_or(1.0);
+                let margin = self.inner.managed_margins.get(provider_name).copied().unwrap_or(1.0);
                 base * margin
             });
 
@@ -1208,13 +1185,11 @@ fn spawn_credit_deduction(
         return;
     }
 
-    let actual_cost = model_registry
-        .find(provider_name, model_id)
-        .map_or(0.0, |profile| {
-            let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-            let margin = managed_margins.get(provider_name).copied().unwrap_or(1.0);
-            base * margin
-        });
+    let actual_cost = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
+        let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
+        let margin = managed_margins.get(provider_name).copied().unwrap_or(1.0);
+        base * margin
+    });
 
     if actual_cost <= 0.0 {
         return;
@@ -1266,13 +1241,11 @@ fn dispatch_usage_event(
         return;
     }
 
-    let estimated_cost_usd = model_registry
-        .find(provider_name, model_id)
-        .map_or(0.0, |profile| {
-            let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-            let margin = managed_margins.get(provider_name).copied().unwrap_or(1.0);
-            base * margin
-        });
+    let estimated_cost_usd = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
+        let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
+        let margin = managed_margins.get(provider_name).copied().unwrap_or(1.0);
+        base * margin
+    });
 
     let idempotency_key = uuid::Uuid::new_v4().to_string();
 

@@ -96,7 +96,11 @@ async fn streaming_chunks_contain_content() {
     let events = parse_sse_data(&text);
 
     // Should have multiple events
-    assert!(events.len() >= 3, "expected at least 3 SSE events, got {}", events.len());
+    assert!(
+        events.len() >= 3,
+        "expected at least 3 SSE events, got {}",
+        events.len()
+    );
 
     // Collect content from all chunk events
     let mut full_content = String::new();
@@ -106,10 +110,7 @@ async fn streaming_chunks_contain_content() {
         }
         if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(event_data) {
             if chunk["object"] == "chat.completion.chunk" {
-                if let Some(content) = chunk["choices"]
-                    .get(0)
-                    .and_then(|c| c["delta"]["content"].as_str())
-                {
+                if let Some(content) = chunk["choices"].get(0).and_then(|c| c["delta"]["content"].as_str()) {
                     full_content.push_str(content);
                 }
             }

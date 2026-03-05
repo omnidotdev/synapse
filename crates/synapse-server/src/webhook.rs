@@ -3,9 +3,9 @@
 //! Receives entitlement change notifications from Aether and invalidates
 //! the local cache so subsequent requests re-check against the source
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use axum::Json;
 use http::{HeaderMap, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -39,9 +39,7 @@ pub async fn entitlement_webhook_handler(
     headers: HeaderMap,
     Json(body): Json<EntitlementChangePayload>,
 ) -> impl IntoResponse {
-    let secret = headers
-        .get("x-gateway-secret")
-        .and_then(|v| v.to_str().ok());
+    let secret = headers.get("x-gateway-secret").and_then(|v| v.to_str().ok());
 
     if secret != Some(state.gateway_secret.expose_secret()) {
         return StatusCode::UNAUTHORIZED;
@@ -72,9 +70,7 @@ pub async fn entitlement_webhook_handler(
                 .invalidate_entitlement(&body.entity_type, &body.entity_id, key);
         }
         for key in ["requests", "input_tokens", "output_tokens"] {
-            state
-                .cache
-                .invalidate_usage(&body.entity_type, &body.entity_id, key);
+            state.cache.invalidate_usage(&body.entity_type, &body.entity_id, key);
         }
         tracing::debug!(
             entity_type = %body.entity_type,

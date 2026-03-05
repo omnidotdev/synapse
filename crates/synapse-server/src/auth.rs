@@ -66,12 +66,12 @@ pub async fn auth_middleware(
             let mut request = request;
 
             // Resolve BYOK keys from Gatekeeper vault when configured
-            if result.mode == KeyMode::Byok {
-                if let Some(ref vault) = vault_client {
-                    let vault_keys = resolve_vault_keys(vault, &result.user_id, &result.provider_keys).await;
-                    if !vault_keys.is_empty() {
-                        request.extensions_mut().insert(VaultProviderKeys(vault_keys));
-                    }
+            if result.mode == KeyMode::Byok
+                && let Some(ref vault) = vault_client
+            {
+                let vault_keys = resolve_vault_keys(vault, &result.user_id, &result.provider_keys).await;
+                if !vault_keys.is_empty() {
+                    request.extensions_mut().insert(VaultProviderKeys(vault_keys));
                 }
             }
 
@@ -110,7 +110,10 @@ async fn resolve_vault_keys(
 
     let mut keys = HashMap::with_capacity(vault_keys.len());
     for vk in vault_keys {
-        keys.insert(vk.provider.clone(), SecretString::from(vk.key.expose_secret().to_string()));
+        keys.insert(
+            vk.provider.clone(),
+            SecretString::from(vk.key.expose_secret().to_string()),
+        );
     }
 
     if !keys.is_empty() {

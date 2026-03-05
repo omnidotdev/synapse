@@ -39,9 +39,7 @@ impl OpenAiEmbeddingsProvider {
     /// Model names arrive as "openai/text-embedding-3-small"; the upstream
     /// API expects just "text-embedding-3-small"
     fn strip_model_prefix(model: &str) -> &str {
-        model
-            .split_once('/')
-            .map_or(model, |(_, model_name)| model_name)
+        model.split_once('/').map_or(model, |(_, model_name)| model_name)
     }
 }
 
@@ -79,21 +77,12 @@ struct OpenAiEmbeddingUsage {
 
 #[async_trait]
 impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
-    async fn embed(
-        &self,
-        request: &EmbeddingRequest,
-        _context: &RequestContext,
-    ) -> Result<EmbeddingResponse> {
+    async fn embed(&self, request: &EmbeddingRequest, _context: &RequestContext) -> Result<EmbeddingResponse> {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let model = Self::strip_model_prefix(&request.model).to_string();
 
         let wire_request = OpenAiEmbeddingRequest {
-            input: request
-                .input
-                .as_vec()
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            input: request.input.as_vec().into_iter().map(String::from).collect(),
             model,
             encoding_format: request.encoding_format.clone(),
             dimensions: request.dimensions,
@@ -108,27 +97,19 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
         let response = self
             .client
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
+            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
             .json(&wire_request)
             .send()
             .await
             .map_err(|e| {
                 tracing::error!(provider = %self.name, error = %e, "embeddings request failed");
-                EmbeddingsError::ConnectionError(format!(
-                    "Failed to send request to OpenAI embeddings: {e}"
-                ))
+                EmbeddingsError::ConnectionError(format!("Failed to send request to OpenAI embeddings: {e}"))
             })?;
 
         let status = response.status();
 
         if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
 
             tracing::error!(
                 provider = %self.name,
@@ -146,15 +127,14 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
             });
         }
 
-        let wire_response: OpenAiEmbeddingResponse =
-            response.json().await.map_err(|e| {
-                tracing::error!(
-                    provider = %self.name,
-                    error = %e,
-                    "failed to parse OpenAI embeddings response"
-                );
-                EmbeddingsError::InternalError(None)
-            })?;
+        let wire_response: OpenAiEmbeddingResponse = response.json().await.map_err(|e| {
+            tracing::error!(
+                provider = %self.name,
+                error = %e,
+                "failed to parse OpenAI embeddings response"
+            );
+            EmbeddingsError::InternalError(None)
+        })?;
 
         tracing::debug!(provider = %self.name, "embeddings request complete");
 

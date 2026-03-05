@@ -60,9 +60,7 @@ async fn flush_loop(
     interval: Duration,
 ) {
     let http = reqwest::Client::new();
-    let url = api_url
-        .join("/internal/report-usage")
-        .expect("valid URL join");
+    let url = api_url.join("/internal/report-usage").expect("valid URL join");
 
     let mut buffer: Vec<UsageEvent> = Vec::new();
     let mut ticker = tokio::time::interval(interval);
@@ -90,12 +88,7 @@ async fn flush_loop(
     tracing::info!("usage reporter shut down");
 }
 
-async fn flush(
-    http: &reqwest::Client,
-    url: &url::Url,
-    gateway_secret: &SecretString,
-    buffer: &mut Vec<UsageEvent>,
-) {
+async fn flush(http: &reqwest::Client, url: &url::Url, gateway_secret: &SecretString, buffer: &mut Vec<UsageEvent>) {
     if buffer.is_empty() {
         return;
     }

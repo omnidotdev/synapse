@@ -25,6 +25,10 @@ pub struct SpeechResponse {
 
 impl SpeechResponse {
     /// Convert the speech response into an axum HTTP response
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fallback error response cannot be constructed
     pub fn into_response(self) -> axum::response::Response {
         axum::response::Response::builder()
             .header(http::header::CONTENT_TYPE, self.content_type)

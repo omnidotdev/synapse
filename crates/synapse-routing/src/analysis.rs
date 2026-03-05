@@ -425,7 +425,10 @@ mod tests {
 
     #[test]
     fn math_detection_latex() {
-        assert_eq!(classify_task("simplify \\frac{a}{b} + \\sum_{i=1}^n x_i"), TaskType::Math);
+        assert_eq!(
+            classify_task("simplify \\frac{a}{b} + \\sum_{i=1}^n x_i"),
+            TaskType::Math
+        );
     }
 
     #[test]
@@ -437,7 +440,10 @@ mod tests {
     fn analysis_detection() {
         assert_eq!(classify_task("analyze the sales data for Q4"), TaskType::Analysis);
         assert_eq!(classify_task("run a regression on the dataset"), TaskType::Analysis);
-        assert_eq!(classify_task("show me the distribution of user ages"), TaskType::Analysis);
+        assert_eq!(
+            classify_task("show me the distribution of user ages"),
+            TaskType::Analysis
+        );
     }
 
     #[test]

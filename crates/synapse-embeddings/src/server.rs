@@ -25,16 +25,13 @@ impl Server {
         context: &RequestContext,
     ) -> crate::error::Result<EmbeddingResponse> {
         // Extract provider name from model (format: "provider/model")
-        let (provider_name, _model_name) =
-            request.model.split_once('/').unwrap_or(("", &request.model));
+        let (provider_name, _model_name) = request.model.split_once('/').unwrap_or(("", &request.model));
 
         let provider = if provider_name.is_empty() {
             // If no provider prefix, use the first provider
-            self.providers.first().ok_or_else(|| {
-                EmbeddingsError::ProviderNotFound(
-                    "No embeddings providers configured".to_string(),
-                )
-            })?
+            self.providers
+                .first()
+                .ok_or_else(|| EmbeddingsError::ProviderNotFound("No embeddings providers configured".to_string()))?
         } else {
             self.providers
                 .iter()
@@ -80,21 +77,16 @@ impl<'a> EmbeddingsServerBuilder<'a> {
         if providers.is_empty() {
             tracing::debug!("No embeddings providers configured");
         } else {
-            tracing::debug!(
-                "Embeddings server initialized with {} provider(s)",
-                providers.len()
-            );
+            tracing::debug!("Embeddings server initialized with {} provider(s)", providers.len());
         }
 
         Ok(Server { providers })
     }
 }
 
-fn resolve_api_key(
-    name: &str,
-    config: &EmbeddingsProviderConfig,
-) -> crate::error::Result<SecretString> {
-    config.api_key.clone().ok_or_else(|| {
-        EmbeddingsError::ConfigError(format!("API key required for embeddings provider '{name}'"))
-    })
+fn resolve_api_key(name: &str, config: &EmbeddingsProviderConfig) -> crate::error::Result<SecretString> {
+    config
+        .api_key
+        .clone()
+        .ok_or_else(|| EmbeddingsError::ConfigError(format!("API key required for embeddings provider '{name}'")))
 }

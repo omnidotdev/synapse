@@ -20,12 +20,9 @@ use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
 /// Default `OpenAI` API base URL
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// OpenAI-compatible provider
-/// Whether the provider is the canonical OpenAI API (vs a compatible third-party)
+/// Whether the provider is the canonical `OpenAI` API (vs a compatible third-party)
 fn is_canonical_openai(base_url: &Url) -> bool {
-    base_url
-        .host_str()
-        .is_some_and(|h| h == "api.openai.com")
+    base_url.host_str().is_some_and(|h| h == "api.openai.com")
 }
 
 /// OpenAI-compatible provider
@@ -194,10 +191,7 @@ impl Provider for OpenAiProvider {
                     }
 
                     match serde_json::from_str::<OpenAiStreamChunk>(&data) {
-                        Ok(chunk) => openai_chunk_to_events(&chunk)
-                            .into_iter()
-                            .map(Ok)
-                            .collect(),
+                        Ok(chunk) => openai_chunk_to_events(&chunk).into_iter().map(Ok).collect(),
                         Err(e) => {
                             tracing::debug!(error = %e, data = %data, "skipping unparseable SSE chunk");
                             vec![]

@@ -7,8 +7,8 @@ use url::Url;
 use crate::circuit::CircuitBreaker;
 use crate::error::BillingError;
 use crate::types::{
-    CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse,
-    EntitlementCheckResponse, EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
+    CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, EntitlementCheckResponse,
+    EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
 };
 
 /// Async HTTP client for the Aether billing API
@@ -222,10 +222,7 @@ impl AetherClient {
     ) -> Result<EntitlementsResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!(
-                "entitlements/{}/{entity_type}/{entity_id}",
-                self.app_id
-            ))
+            .join(&format!("entitlements/{}/{entity_type}/{entity_id}", self.app_id))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -273,10 +270,7 @@ impl AetherClient {
     ) -> Result<CreditCheckResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!(
-                "credits/{}/{entity_type}/{entity_id}/check",
-                self.app_id
-            ))
+            .join(&format!("credits/{}/{entity_type}/{entity_id}/check", self.app_id))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -325,10 +319,7 @@ impl AetherClient {
     ) -> Result<CreditDeductResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!(
-                "credits/{}/{entity_type}/{entity_id}/deduct",
-                self.app_id
-            ))
+            .join(&format!("credits/{}/{entity_type}/{entity_id}/deduct", self.app_id))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -368,13 +359,10 @@ impl AetherClient {
     ///
     /// Returns an error if Aether is unreachable
     pub async fn health(&self) -> Result<(), BillingError> {
-        let url = self
-            .base_url
-            .join("health")
-            .map_err(|e| BillingError::Api {
-                status: 0,
-                message: format!("invalid URL: {e}"),
-            })?;
+        let url = self.base_url.join("health").map_err(|e| BillingError::Api {
+            status: 0,
+            message: format!("invalid URL: {e}"),
+        })?;
 
         let response = self
             .http
@@ -484,9 +472,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client
-            .check_entitlement("user", "usr_123", "api_access")
-            .await;
+        let result = client.check_entitlement("user", "usr_123", "api_access").await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -506,9 +492,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client
-            .check_entitlement("user", "usr_123", "api_access")
-            .await;
+        let result = client.check_entitlement("user", "usr_123", "api_access").await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();

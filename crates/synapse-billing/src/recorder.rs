@@ -89,11 +89,7 @@ impl std::fmt::Debug for UsageRecorder {
 }
 
 /// Background task that processes usage events
-async fn process_events(
-    mut rx: mpsc::UnboundedReceiver<UsageEvent>,
-    client: AetherClient,
-    meter_keys: MeterKeys,
-) {
+async fn process_events(mut rx: mpsc::UnboundedReceiver<UsageEvent>, client: AetherClient, meter_keys: MeterKeys) {
     while let Some(event) = rx.recv().await {
         record_event(&client, &meter_keys, &event).await;
     }
@@ -176,10 +172,7 @@ fn build_metadata(event: &UsageEvent) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
     metadata.insert("model".to_owned(), event.model.clone());
     metadata.insert("provider".to_owned(), event.provider.clone());
-    metadata.insert(
-        "estimated_cost_usd".to_owned(),
-        event.estimated_cost_usd.to_string(),
-    );
+    metadata.insert("estimated_cost_usd".to_owned(), event.estimated_cost_usd.to_string());
     metadata
 }
 

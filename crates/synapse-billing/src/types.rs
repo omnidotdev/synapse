@@ -25,7 +25,7 @@ pub struct RecordUsageResponse {
     pub accepted: bool,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 

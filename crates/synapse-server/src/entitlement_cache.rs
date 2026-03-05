@@ -35,14 +35,8 @@ impl EntitlementCache {
         let ttl = Duration::from_secs(ttl_secs);
 
         Self {
-            entitlements: Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(ttl)
-                .build(),
-            usage: Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(ttl)
-                .build(),
+            entitlements: Cache::builder().max_capacity(10_000).time_to_live(ttl).build(),
+            usage: Cache::builder().max_capacity(10_000).time_to_live(ttl).build(),
         }
     }
 
@@ -53,13 +47,7 @@ impl EntitlementCache {
     }
 
     /// Cache an entitlement check result
-    pub fn put_entitlement(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-        feature_key: &str,
-        result: CachedEntitlement,
-    ) {
+    pub fn put_entitlement(&self, entity_type: &str, entity_id: &str, feature_key: &str, result: CachedEntitlement) {
         let key = format!("{entity_type}:{entity_id}:{feature_key}");
         self.entitlements.insert(key, result);
     }
@@ -71,13 +59,7 @@ impl EntitlementCache {
     }
 
     /// Cache a usage check result
-    pub fn put_usage(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-        meter_key: &str,
-        result: CachedUsageCheck,
-    ) {
+    pub fn put_usage(&self, entity_type: &str, entity_id: &str, meter_key: &str, result: CachedUsageCheck) {
         let key = format!("{entity_type}:{entity_id}:{meter_key}");
         self.usage.insert(key, result);
     }
@@ -116,10 +98,15 @@ mod tests {
     fn cache_hit_returns_value() {
         let cache = EntitlementCache::new(60);
 
-        cache.put_entitlement("user", "usr_1", "api_access", CachedEntitlement {
-            has_access: true,
-            version: Some(1),
-        });
+        cache.put_entitlement(
+            "user",
+            "usr_1",
+            "api_access",
+            CachedEntitlement {
+                has_access: true,
+                version: Some(1),
+            },
+        );
 
         let result = cache.get_entitlement("user", "usr_1", "api_access");
         assert!(result.is_some());
@@ -130,9 +117,7 @@ mod tests {
     fn cache_usage_hit() {
         let cache = EntitlementCache::new(60);
 
-        cache.put_usage("user", "usr_1", "input_tokens", CachedUsageCheck {
-            allowed: true,
-        });
+        cache.put_usage("user", "usr_1", "input_tokens", CachedUsageCheck { allowed: true });
 
         let result = cache.get_usage("user", "usr_1", "input_tokens");
         assert!(result.is_some());
@@ -143,13 +128,16 @@ mod tests {
     fn invalidate_clears_specific_entries() {
         let cache = EntitlementCache::new(60);
 
-        cache.put_entitlement("user", "usr_1", "api_access", CachedEntitlement {
-            has_access: true,
-            version: Some(1),
-        });
-        cache.put_usage("user", "usr_1", "input_tokens", CachedUsageCheck {
-            allowed: true,
-        });
+        cache.put_entitlement(
+            "user",
+            "usr_1",
+            "api_access",
+            CachedEntitlement {
+                has_access: true,
+                version: Some(1),
+            },
+        );
+        cache.put_usage("user", "usr_1", "input_tokens", CachedUsageCheck { allowed: true });
 
         cache.invalidate_entitlement("user", "usr_1", "api_access");
         cache.invalidate_usage("user", "usr_1", "input_tokens");

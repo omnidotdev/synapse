@@ -144,10 +144,7 @@ impl GuardrailEngine {
     ///
     /// Returns an error if any regex pattern is invalid
     pub fn new(rules: &[Rule]) -> Result<Self, GuardrailError> {
-        let compiled = rules
-            .iter()
-            .map(compile_rule)
-            .collect::<Result<Vec<_>, _>>()?;
+        let compiled = rules.iter().map(compile_rule).collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self { rules: compiled })
     }
@@ -213,9 +210,7 @@ impl RuleMatcher {
                 // Token estimate: ~1.3 tokens per word
                 let estimated_tokens = word_count + word_count * 3 / 10;
                 if estimated_tokens > *limit {
-                    return Some(format!(
-                        "estimated {estimated_tokens} tokens exceeds limit of {limit}"
-                    ));
+                    return Some(format!("estimated {estimated_tokens} tokens exceeds limit of {limit}"));
                 }
                 None
             }
@@ -233,43 +228,26 @@ impl RuleMatcher {
 
 fn compile_rule(rule: &Rule) -> Result<CompiledRule, GuardrailError> {
     match rule {
-        Rule::KeywordBlocklist {
-            name,
-            keywords,
-            action,
-        } => Ok(CompiledRule {
+        Rule::KeywordBlocklist { name, keywords, action } => Ok(CompiledRule {
             name: name.clone(),
             action: action.clone(),
             matcher: RuleMatcher::Keywords(keywords.clone()),
         }),
-        Rule::RegexPattern {
-            name,
-            pattern,
-            action,
-        } => {
-            let compiled = Regex::new(pattern).map_err(|e| {
-                GuardrailError::InvalidPattern(format!("{pattern}: {e}"))
-            })?;
+        Rule::RegexPattern { name, pattern, action } => {
+            let compiled =
+                Regex::new(pattern).map_err(|e| GuardrailError::InvalidPattern(format!("{pattern}: {e}")))?;
             Ok(CompiledRule {
                 name: name.clone(),
                 action: action.clone(),
                 matcher: RuleMatcher::Regex(compiled),
             })
         }
-        Rule::MaxInputTokens {
-            name,
-            limit,
-            action,
-        } => Ok(CompiledRule {
+        Rule::MaxInputTokens { name, limit, action } => Ok(CompiledRule {
             name: name.clone(),
             action: action.clone(),
             matcher: RuleMatcher::MaxTokens(*limit),
         }),
-        Rule::Pii {
-            name,
-            detect,
-            action,
-        } => {
+        Rule::Pii { name, detect, action } => {
             let detectors = detect
                 .iter()
                 .map(|pii_type| {
@@ -312,17 +290,13 @@ fn credit_card_regex() -> &'static Regex {
 
 fn email_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-            .expect("valid email regex")
-    })
+    RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").expect("valid email regex"))
 }
 
 fn phone_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
-            .expect("valid phone regex")
+        Regex::new(r"\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").expect("valid phone regex")
     })
 }
 

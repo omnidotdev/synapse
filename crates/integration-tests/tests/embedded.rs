@@ -61,8 +61,6 @@ async fn embedded_stt_returns_error() {
         .build();
 
     let client = SynapseClient::embedded(config).await.unwrap();
-    let result = client
-        .transcribe(bytes::Bytes::new(), "test.wav", "whisper-1")
-        .await;
+    let result = client.transcribe(bytes::Bytes::new(), "test.wav", "whisper-1").await;
     assert!(result.is_err());
 }

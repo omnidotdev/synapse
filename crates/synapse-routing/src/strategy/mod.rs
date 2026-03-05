@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use synapse_config::RoutingConfig;
 
+use crate::RoutingDecision;
 use crate::analysis::QueryProfile;
 use crate::error::RoutingError;
 use crate::feedback::FeedbackTracker;
 use crate::registry::ModelRegistry;
-use crate::RoutingDecision;
 
 pub mod cascade;
 pub mod cost;
@@ -29,7 +29,7 @@ pub trait Strategy: Send + Sync {
     ) -> Result<RoutingDecision, RoutingError>;
 
     /// Human-readable strategy name
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 
 /// Threshold strategy wrapper
@@ -48,7 +48,7 @@ impl Strategy for ThresholdStrategy {
         threshold::route(profile, registry, &self.config, feedback)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "threshold"
     }
 }
@@ -69,7 +69,7 @@ impl Strategy for CostStrategy {
         cost::route(profile, registry, &self.config, feedback)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cost"
     }
 }
@@ -90,7 +90,7 @@ impl Strategy for CascadeStrategy {
         cascade::route(profile, registry, &self.config, feedback)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cascade"
     }
 }
@@ -111,7 +111,7 @@ impl Strategy for ScoreStrategy {
         score::route(profile, registry, &self.config, feedback)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "score"
     }
 }
@@ -238,9 +238,6 @@ mod tests {
 
     #[test]
     fn custom_strategy_registration() {
-        let config = RoutingConfig::default();
-        let mut strategy_reg = StrategyRegistry::from_config(&config);
-
         // Register a custom strategy that always picks the best quality model
         struct AlwaysBest;
         impl Strategy for AlwaysBest {
@@ -258,11 +255,13 @@ mod tests {
                     alternatives: vec![],
                 })
             }
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "always-best"
             }
         }
 
+        let config = RoutingConfig::default();
+        let mut strategy_reg = StrategyRegistry::from_config(&config);
         strategy_reg.register("always-best", Box::new(AlwaysBest));
 
         let model_reg = test_registry();

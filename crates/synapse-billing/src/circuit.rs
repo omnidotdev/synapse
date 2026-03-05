@@ -12,7 +12,7 @@ const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Circuit breaker that short-circuits billing calls when Aether is unhealthy
 #[derive(Clone)]
-pub(crate) struct CircuitBreaker {
+pub struct CircuitBreaker {
     state: Arc<CircuitState>,
 }
 
@@ -39,7 +39,11 @@ impl CircuitBreaker {
     /// Returns `BillingError::CircuitOpen` if the circuit is open and the
     /// recovery timeout has not elapsed
     pub(crate) fn check(&self) -> Result<(), BillingError> {
-        let opened_at = self.state.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+        let opened_at = self
+            .state
+            .opened_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         match *opened_at {
             // Circuit is closed
@@ -54,7 +58,11 @@ impl CircuitBreaker {
     /// Record a successful request, closing the circuit
     pub(crate) fn record_success(&self) {
         self.state.failure_count.store(0, Ordering::Relaxed);
-        let mut opened_at = self.state.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+        let mut opened_at = self
+            .state
+            .opened_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *opened_at = None;
     }
 
@@ -63,7 +71,11 @@ impl CircuitBreaker {
         let prev = self.state.failure_count.fetch_add(1, Ordering::Relaxed);
 
         if prev + 1 >= FAILURE_THRESHOLD {
-            let mut opened_at = self.state.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+            let mut opened_at = self
+                .state
+                .opened_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *opened_at = Some(Instant::now());
         }
     }
@@ -131,7 +143,11 @@ mod tests {
         // Simulate elapsed recovery timeout by backdating `opened_at`
         {
             let mut opened_at = cb.state.opened_at.lock().unwrap();
-            *opened_at = Some(Instant::now() - RECOVERY_TIMEOUT - Duration::from_millis(1));
+            *opened_at = Some(
+                Instant::now()
+                    .checked_sub(RECOVERY_TIMEOUT + Duration::from_millis(1))
+                    .unwrap(),
+            );
         }
 
         assert!(cb.check().is_ok());
@@ -148,7 +164,11 @@ mod tests {
         // Backdate to allow probe
         {
             let mut opened_at = cb.state.opened_at.lock().unwrap();
-            *opened_at = Some(Instant::now() - RECOVERY_TIMEOUT - Duration::from_millis(1));
+            *opened_at = Some(
+                Instant::now()
+                    .checked_sub(RECOVERY_TIMEOUT + Duration::from_millis(1))
+                    .unwrap(),
+            );
         }
 
         // Probe allowed

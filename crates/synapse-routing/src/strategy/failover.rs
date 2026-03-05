@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::RoutingDecision;
 use crate::error::RoutingError;
 use crate::feedback::FeedbackTracker;
-use crate::RoutingDecision;
 
 /// Track which providers are currently marked unhealthy
 #[derive(Debug)]
@@ -47,9 +47,8 @@ impl FailoverState {
     /// and prunes providers whose recovery window has elapsed
     pub fn update_health(&self, feedback: &FeedbackTracker, providers: &[String]) {
         // Prune recovered providers
-        self.down_providers.retain(|_, marked_at| {
-            marked_at.elapsed() < self.recovery_window
-        });
+        self.down_providers
+            .retain(|_, marked_at| marked_at.elapsed() < self.recovery_window);
 
         // Check each provider's error rate
         for provider in providers {
@@ -78,9 +77,7 @@ impl FailoverState {
     pub fn is_healthy(&self, provider: &str) -> bool {
         self.down_providers
             .get(provider)
-            .is_none_or(|marked_at| {
-                marked_at.elapsed() >= self.recovery_window
-            })
+            .is_none_or(|marked_at| marked_at.elapsed() >= self.recovery_window)
     }
 
     /// Apply failover logic to a routing decision
@@ -113,9 +110,8 @@ impl FailoverState {
                 );
 
                 // Build new alternatives: original primary + remaining alternatives
-                let mut new_alternatives: Vec<(String, String)> = vec![
-                    (decision.provider.clone(), decision.model.clone()),
-                ];
+                let mut new_alternatives: Vec<(String, String)> =
+                    vec![(decision.provider.clone(), decision.model.clone())];
                 for (p, m) in &decision.alternatives {
                     if p != alt_provider || m != alt_model {
                         new_alternatives.push((p.clone(), m.clone()));
@@ -156,7 +152,7 @@ mod tests {
     fn healthy_provider_passes_through() {
         let state = FailoverState::new(Duration::from_secs(60), 0.5);
         let decision = test_decision();
-        let result = state.apply(decision.clone()).unwrap();
+        let result = state.apply(decision).unwrap();
 
         assert_eq!(result.provider, "primary");
         assert_eq!(result.model, "model-a");
@@ -186,7 +182,7 @@ mod tests {
         // Mark primary as down in the past
         state.down_providers.insert(
             "primary".to_owned(),
-            Instant::now() - Duration::from_millis(10),
+            Instant::now().checked_sub(Duration::from_millis(10)).unwrap(),
         );
 
         // Provider should be healthy again
@@ -243,7 +239,7 @@ mod tests {
         // Insert a provider that was marked down long ago
         state.down_providers.insert(
             "recovered".to_owned(),
-            Instant::now() - Duration::from_millis(10),
+            Instant::now().checked_sub(Duration::from_millis(10)).unwrap(),
         );
 
         let feedback = FeedbackTracker::new();

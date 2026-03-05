@@ -144,11 +144,10 @@ impl ApiKeyResolver {
             return Err(AuthError::ApiError { status, message });
         }
 
-        let resolved: ResolvedKey =
-            response.json().await.map_err(|e| AuthError::ApiError {
-                status: 0,
-                message: format!("failed to parse response: {e}"),
-            })?;
+        let resolved: ResolvedKey = response.json().await.map_err(|e| AuthError::ApiError {
+            status: 0,
+            message: format!("failed to parse response: {e}"),
+        })?;
 
         let resolved = Arc::new(resolved);
         self.cache.insert(cache_key, Arc::clone(&resolved));
