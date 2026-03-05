@@ -79,6 +79,12 @@ jobs:
           tar czf ../../../synapse-${{ matrix.target }}.tar.gz synapse
           cd ../../..
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-${{ matrix.target }}
+          path: synapse-${{ matrix.target }}.tar.gz
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
@@ -135,3 +141,159 @@ jobs:
           oras push manifold.omni.dev/omni/synapse-gateway-openapi:${{ needs.release.outputs.publishedVersion }} \
             --artifact-type application/vnd.omni.openapi \
             openapi.yaml:application/vnd.oai.openapi+yaml
+
+  publish:
+    name: Publish packages 📦
+    needs: [release, build]
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${{ needs.release.outputs.publishedVersion }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Update Homebrew tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        if: env.TAP_GITHUB_TOKEN != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          MACOS_X86_SHA256=$(shasum -a 256 artifacts/synapse-x86_64-apple-darwin/synapse-x86_64-apple-darwin.tar.gz | awk '{print $1}')
+          MACOS_ARM_SHA256=$(shasum -a 256 artifacts/synapse-aarch64-apple-darwin/synapse-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+          LINUX_X86_SHA256=$(shasum -a 256 artifacts/synapse-x86_64-unknown-linux-gnu/synapse-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          LINUX_ARM_SHA256=$(shasum -a 256 artifacts/synapse-aarch64-unknown-linux-gnu/synapse-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+
+          git clone https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/omnidotdev/homebrew-tap.git tap
+          cd tap
+
+          mkdir -p Formula
+          cat > Formula/synapse.rb <<'FORMULAEOF'
+          class Synapse < Formula
+            desc "AI model router and gateway"
+            homepage "https://synapse.omni.dev"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/omnidotdev/synapse-gateway/releases/download/v${VERSION}/synapse-aarch64-apple-darwin.tar.gz"
+                sha256 "${MACOS_ARM_SHA256}"
+              end
+              on_intel do
+                url "https://github.com/omnidotdev/synapse-gateway/releases/download/v${VERSION}/synapse-x86_64-apple-darwin.tar.gz"
+                sha256 "${MACOS_X86_SHA256}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/omnidotdev/synapse-gateway/releases/download/v${VERSION}/synapse-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_ARM_SHA256}"
+              end
+              on_intel do
+                url "https://github.com/omnidotdev/synapse-gateway/releases/download/v${VERSION}/synapse-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_X86_SHA256}"
+              end
+            end
+
+            def install
+              bin.install "synapse"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/synapse --version")
+            end
+          end
+          FORMULAEOF
+          sed -i "s/\${VERSION}/${VERSION}/g; s/\${MACOS_ARM_SHA256}/${MACOS_ARM_SHA256}/g; s/\${MACOS_X86_SHA256}/${MACOS_X86_SHA256}/g; s/\${LINUX_X86_SHA256}/${LINUX_X86_SHA256}/g; s/\${LINUX_ARM_SHA256}/${LINUX_ARM_SHA256}/g" Formula/synapse.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/synapse.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update synapse to v${VERSION}"
+            git push
+          fi
+
+      - name: Publish to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          cat >> ~/.ssh/config <<SSH
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+          SSH
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+          publish_aur() {
+            local pkg="$1"
+            git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "${pkg}" 2>/dev/null || {
+              mkdir "${pkg}" && cd "${pkg}" && git init && git remote add origin "ssh://aur@aur.archlinux.org/${pkg}.git" && cd ..
+            }
+            cd "${pkg}"
+            cp "../misc/packaging/aur/${pkg}/PKGBUILD" .
+            sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+            # Compute checksums for source URLs (replaces updpkgsums)
+            local -a checksums=()
+            while IFS= read -r src; do
+              local url="${src#*::}"
+              checksums+=("$(curl -fsSL "$url" | sha256sum | awk '{print $1}')")
+            done < <(bash -c "source PKGBUILD 2>/dev/null; printf '%s\n' \"\${source[@]}\"")
+
+            # Update sha256sums in PKGBUILD
+            perl -i -0777 -pe 's/^sha256sums=\(.*?\)\n//ms' PKGBUILD
+            {
+              printf "sha256sums=("
+              for i in "${!checksums[@]}"; do
+                [[ $i -gt 0 ]] && printf "\n            "
+                printf "'%s'" "${checksums[$i]}"
+              done
+              printf ")\n"
+            } >> PKGBUILD
+
+            # Generate .SRCINFO (replaces makepkg --printsrcinfo)
+            (
+              source PKGBUILD 2>/dev/null
+              printf "pkgbase = %s\n" "$pkgname"
+              printf "\tpkgdesc = %s\n" "$pkgdesc"
+              printf "\tpkgver = %s\n" "$pkgver"
+              printf "\tpkgrel = %s\n" "$pkgrel"
+              printf "\turl = %s\n" "$url"
+              for v in "${arch[@]}"; do printf "\tarch = %s\n" "$v"; done
+              for v in "${license[@]}"; do printf "\tlicense = %s\n" "$v"; done
+              for v in "${makedepends[@]}"; do printf "\tmakedepends = %s\n" "$v"; done
+              for v in "${depends[@]}"; do printf "\tdepends = %s\n" "$v"; done
+              [[ -v provides ]] && for v in "${provides[@]}"; do printf "\tprovides = %s\n" "$v"; done
+              [[ -v conflicts ]] && for v in "${conflicts[@]}"; do printf "\tconflicts = %s\n" "$v"; done
+              for v in "${source[@]}"; do printf "\tsource = %s\n" "$v"; done
+              for v in "${sha256sums[@]}"; do printf "\tsha256sums = %s\n" "$v"; done
+              printf "\n"
+              printf "pkgname = %s\n" "$pkgname"
+            ) > .SRCINFO
+            git config user.name "Omni"
+            git config user.email "team@omni.dev"
+            git add PKGBUILD .SRCINFO
+            git diff --cached --quiet || git commit -m "Update to v${VERSION}"
+            git push origin master
+            cd ..
+          }
+
+          publish_aur "omnidotdev-synapse-gateway"
+          publish_aur "omnidotdev-synapse-gateway-bin"
+
+          rm -f ~/.ssh/aur
