@@ -28,10 +28,12 @@ async fn primary_succeeds_no_failover() {
 
     let server = TestServer::start(config).await.unwrap();
 
+    // Use implicit model name so failover path is used (explicit "provider/model"
+    // bypasses failover by design)
     let resp = server
         .client()
         .post(server.url("/v1/chat/completions"))
-        .json(&completion_body("primary/mock-model-1"))
+        .json(&completion_body("mock-model-1"))
         .send()
         .await
         .unwrap();
@@ -63,10 +65,12 @@ async fn primary_fails_failover_to_backup() {
 
     let server = TestServer::start(config).await.unwrap();
 
+    // Use implicit model name so failover path is used (explicit "provider/model"
+    // bypasses failover by design)
     let resp = server
         .client()
         .post(server.url("/v1/chat/completions"))
-        .json(&completion_body("primary/mock-model-1"))
+        .json(&completion_body("mock-model-1"))
         .send()
         .await
         .unwrap();
@@ -125,10 +129,11 @@ async fn all_providers_fail_returns_error() {
 
     let server = TestServer::start(config).await.unwrap();
 
+    // Use implicit model name so failover path is used
     let resp = server
         .client()
         .post(server.url("/v1/chat/completions"))
-        .json(&completion_body("primary/mock-model-1"))
+        .json(&completion_body("mock-model-1"))
         .send()
         .await
         .unwrap();
