@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Programmatic configuration builder for integration tests
 
 use std::net::SocketAddr;

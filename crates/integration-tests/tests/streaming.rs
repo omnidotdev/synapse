@@ -108,12 +108,11 @@ async fn streaming_chunks_contain_content() {
         if event_data == "[DONE]" {
             continue;
         }
-        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(event_data) {
-            if chunk["object"] == "chat.completion.chunk" {
-                if let Some(content) = chunk["choices"].get(0).and_then(|c| c["delta"]["content"].as_str()) {
-                    full_content.push_str(content);
-                }
-            }
+        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(event_data)
+            && chunk["object"] == "chat.completion.chunk"
+            && let Some(content) = chunk["choices"].get(0).and_then(|c| c["delta"]["content"].as_str())
+        {
+            full_content.push_str(content);
         }
     }
 
@@ -225,30 +224,30 @@ async fn streaming_tool_call_encoding() {
         if event_data == "[DONE]" {
             continue;
         }
-        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(event_data) {
-            if let Some(choices) = chunk["choices"].as_array() {
-                for choice in choices {
-                    // Check for tool_calls in delta
-                    if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
-                        for tc in tool_calls {
-                            if tc.get("id").and_then(|v| v.as_str()).is_some() {
-                                found_tool_call_id = true;
+        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(event_data)
+            && let Some(choices) = chunk["choices"].as_array()
+        {
+            for choice in choices {
+                // Check for tool_calls in delta
+                if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
+                    for tc in tool_calls {
+                        if tc.get("id").and_then(|v| v.as_str()).is_some() {
+                            found_tool_call_id = true;
+                        }
+                        if let Some(func) = tc.get("function") {
+                            if func.get("name").and_then(|v| v.as_str()).is_some() {
+                                found_tool_call_name = true;
                             }
-                            if let Some(func) = tc.get("function") {
-                                if func.get("name").and_then(|v| v.as_str()).is_some() {
-                                    found_tool_call_name = true;
-                                }
-                                if func.get("arguments").and_then(|v| v.as_str()).is_some() {
-                                    found_tool_call_args = true;
-                                }
+                            if func.get("arguments").and_then(|v| v.as_str()).is_some() {
+                                found_tool_call_args = true;
                             }
                         }
                     }
+                }
 
-                    // Check for tool_calls finish reason
-                    if choice["finish_reason"].as_str() == Some("tool_calls") {
-                        found_tool_calls_finish = true;
-                    }
+                // Check for tool_calls finish reason
+                if choice["finish_reason"].as_str() == Some("tool_calls") {
+                    found_tool_calls_finish = true;
                 }
             }
         }

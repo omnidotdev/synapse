@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Mock LLM backend server for integration tests
 //!
 //! Implements a minimal OpenAI-compatible API that returns canned responses

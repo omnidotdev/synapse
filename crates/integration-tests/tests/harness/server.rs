@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Test server wrapper that starts Synapse on a random port
 
 use std::net::SocketAddr;
