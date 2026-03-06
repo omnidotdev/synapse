@@ -18,9 +18,9 @@ pub struct VaultProviderKeys(pub HashMap<String, SecretString>);
 
 /// Authenticate requests via API key
 ///
-/// Extracts Bearer token from Authorization header. If it starts with
-/// `synapse_`, resolves it via synapse-api. Skips auth for public paths
-/// and passes through non-synapse tokens for existing auth flows.
+/// Extracts Bearer token from Authorization header, which must use the
+/// `synapse_` prefix. Rejects requests without a valid token unless the
+/// path is in the public paths list.
 ///
 /// When a `VaultClient` is provided and the key mode is BYOK, provider
 /// keys are resolved from Gatekeeper's vault as an overlay
@@ -45,11 +45,11 @@ pub async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     let Some(token) = token else {
-        return next.run(request).await;
+        return (StatusCode::UNAUTHORIZED, "missing Authorization header").into_response();
     };
 
     if !token.starts_with("synapse_") {
-        return next.run(request).await;
+        return (StatusCode::UNAUTHORIZED, "invalid API key format").into_response();
     }
 
     match resolver.resolve(token).await {
