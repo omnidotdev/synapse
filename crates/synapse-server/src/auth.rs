@@ -32,6 +32,11 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // Allow CORS preflight through without auth so the CORS layer can respond
+    if request.method() == http::Method::OPTIONS {
+        return next.run(request).await;
+    }
+
     let path = request.uri().path().to_string();
 
     if public_paths.iter().any(|p| path.starts_with(p)) {

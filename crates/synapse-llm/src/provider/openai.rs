@@ -133,6 +133,12 @@ impl Provider for OpenAiProvider {
                 return Err(LlmError::RateLimited { retry_after: 0 });
             }
 
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(LlmError::Unauthorized);
+            }
+
             return Err(LlmError::Upstream(format!("provider returned {status}: {body}")));
         }
 
@@ -189,6 +195,12 @@ impl Provider for OpenAiProvider {
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(LlmError::RateLimited { retry_after: 0 });
+            }
+
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(LlmError::Unauthorized);
             }
 
             return Err(LlmError::Upstream(format!("provider returned {status}: {body}")));
