@@ -64,7 +64,7 @@ pub async fn auth_middleware(
                 entity_id: result.user_id.clone(),
                 mode: match result.mode {
                     KeyMode::Byok => BillingMode::Byok,
-                    KeyMode::Managed => BillingMode::Managed,
+                    KeyMode::Managed | KeyMode::Manual => BillingMode::Managed,
                 },
             };
 

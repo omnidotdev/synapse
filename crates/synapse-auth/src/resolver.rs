@@ -10,15 +10,17 @@ use sha2::{Digest, Sha256};
 use crate::AuthError;
 
 /// Plan-based rate limits from synapse-api
+///
+/// Token limits use `i64` because `-1` represents unlimited.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimits {
     /// Maximum requests per minute
     pub requests_per_minute: u32,
-    /// Maximum tokens per day
-    pub tokens_per_day: u64,
-    /// Maximum tokens per month
-    pub tokens_per_month: u64,
+    /// Maximum tokens per day (`-1` = unlimited)
+    pub tokens_per_day: i64,
+    /// Maximum tokens per month (`-1` = unlimited)
+    pub tokens_per_month: i64,
 }
 
 /// Resolved API key context from synapse-api
@@ -51,6 +53,8 @@ pub enum KeyMode {
     Byok,
     /// Omni-managed provider keys with billing
     Managed,
+    /// Manually created key (treated as managed for billing)
+    Manual,
 }
 
 /// Reference to a decrypted provider key
