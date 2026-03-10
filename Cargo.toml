@@ -105,7 +105,7 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = "0.5.2"
 tower-http = "0.6.6"
-agent-core = "0.1.0"
+agent-core = "0.6.0"
 url = "2.5.4"
 uuid = "1.17.0"
 
