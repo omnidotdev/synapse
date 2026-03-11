@@ -299,7 +299,7 @@ action = "warn"
 service_name = "synapse-gateway"
 
 [telemetry.exporter]
-endpoint = "{{ env.OTEL_ENDPOINT | default("http://otel-collector:4317") }}"
+endpoint = "{{ env.OTEL_EXPORTER_OTLP_ENDPOINT | default("http://otel-collector:4317") }}"
 protocol = "grpc"
 
 [telemetry.tracing]
