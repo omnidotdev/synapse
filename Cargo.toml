@@ -23,7 +23,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22.1"
 clap = "4.5.41"
 clickhouse = { version = "0.13", features = ["lz4"] }
-convert_case = "0.8.0"
+convert_case = "0.11.0"
 ctor = "0.5.0"
 dashmap = "6.1.0"
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
