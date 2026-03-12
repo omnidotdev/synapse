@@ -27,7 +27,7 @@ convert_case = "0.8.0"
 ctor = "0.5.0"
 dashmap = "6.1.0"
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
-duration-str = "0.17"
+duration-str = "0.21"
 eventsource-stream = "0.2.3"
 fast-glob = "1.0.0"
 futures = "0.3.31"
