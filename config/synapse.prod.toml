@@ -1,0 +1,308 @@
+# Synapse Production Configuration
+#
+# Baked into the Docker image at /etc/synapse.toml.
+# Secrets are interpolated from environment variables at runtime.
+
+[server]
+listen_address = "[::]:3000"
+
+[server.health]
+enabled = true
+path = "/health"
+
+[server.rate_limit]
+[server.rate_limit.storage]
+type = "cache"
+url = "{{ env.VALKEY_URL }}"
+
+[server.rate_limit.global]
+requests = 1000
+window = "1m"
+
+[server.rate_limit.per_ip]
+requests = 120
+window = "1m"
+
+[server.cors]
+origins = ["https://synapse.omni.dev"]
+methods = ["GET", "POST", "OPTIONS"]
+headers = ["Content-Type", "Authorization", "X-Api-Key"]
+credentials = true
+max_age = 3600
+
+# ------------------------------------
+# LLM Providers
+# ------------------------------------
+
+[llm.providers.openai]
+type = "openai"
+api_key = "{{ env.OPENAI_API_KEY }}"
+
+[llm.providers.anthropic]
+type = "anthropic"
+api_key = "{{ env.ANTHROPIC_API_KEY }}"
+
+[llm.providers.nvidia]
+type = "openai"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key = "{{ env.NVIDIA_API_KEY }}"
+
+# ------------------------------------
+# Intelligent Routing
+# ------------------------------------
+
+[llm.routing]
+enabled = true
+strategy = "threshold"
+
+[llm.routing.threshold]
+low_complexity_model = "openai/gpt-4o-mini"
+high_complexity_model = "anthropic/claude-sonnet-4-5-20250929"
+quality_floor = 0.7
+
+[[llm.routing.models]]
+provider = "openai"
+model = "gpt-4o-mini"
+input_per_mtok = 0.15
+output_per_mtok = 0.60
+quality = 0.7
+context_window = 128000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+
+[[llm.routing.models]]
+provider = "openai"
+model = "gpt-4o"
+input_per_mtok = 2.50
+output_per_mtok = 10.00
+quality = 0.88
+context_window = 128000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-opus-4-6"
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+quality = 0.97
+context_window = 200000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-5-20250929"
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+quality = 0.93
+context_window = 200000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+quality = 0.92
+context_window = 200000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-haiku-4-5-20251001"
+input_per_mtok = 0.80
+output_per_mtok = 4.00
+quality = 0.75
+context_window = 200000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+
+[[llm.routing.models]]
+provider = "openai"
+model = "o3-mini"
+input_per_mtok = 1.10
+output_per_mtok = 4.40
+quality = 0.87
+context_window = 128000
+[llm.routing.models.capabilities]
+tool_calling = true
+
+[[llm.routing.models]]
+provider = "nvidia"
+model = "moonshotai/kimi-k2.5"
+input_per_mtok = 0.60
+output_per_mtok = 2.50
+quality = 0.89
+context_window = 262000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+# ------------------------------------
+# Failover
+# ------------------------------------
+
+[llm.failover]
+enabled = true
+max_attempts = 2
+
+[[llm.failover.equivalence_groups]]
+name = "frontier"
+models = ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-5-20250929", "openai/gpt-4o", "anthropic/claude-sonnet-4-20250514", "nvidia/moonshotai/kimi-k2.5"]
+
+[[llm.failover.equivalence_groups]]
+name = "fast"
+models = ["openai/gpt-4o-mini", "anthropic/claude-haiku-4-5-20251001"]
+
+[llm.failover.circuit_breaker]
+error_threshold = 5
+window_seconds = 60
+recovery_seconds = 30
+
+# ------------------------------------
+# Embeddings
+# ------------------------------------
+
+[embeddings.providers.openai]
+type = "openai"
+api_key = "{{ env.OPENAI_API_KEY }}"
+
+# ------------------------------------
+# Image Generation
+# ------------------------------------
+
+[imagegen.providers.openai]
+type = "openai"
+api_key = "{{ env.OPENAI_API_KEY }}"
+
+# ------------------------------------
+# Speech-to-Text
+# ------------------------------------
+
+[stt.providers.whisper]
+type = "whisper"
+api_key = "{{ env.OPENAI_API_KEY }}"
+
+# ------------------------------------
+# Text-to-Speech
+# ------------------------------------
+
+[tts.providers.openai]
+type = "openai_tts"
+api_key = "{{ env.OPENAI_API_KEY }}"
+
+# ------------------------------------
+# MCP Tool Servers
+# ------------------------------------
+
+[mcp.servers.brave_search.type]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-brave-search"]
+env = { BRAVE_API_KEY = "{{ env.BRAVE_API_KEY | default("") }}" }
+
+[mcp.servers.fetch.type]
+transport = "stdio"
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# ------------------------------------
+# API Key Authentication
+# ------------------------------------
+
+[auth]
+enabled = true
+api_url = "{{ env.SYNAPSE_API_URL | default("https://api.synapse.omni.dev") }}"
+gateway_secret = "{{ env.GATEWAY_SECRET }}"
+cache_ttl_seconds = 60
+cache_capacity = 10000
+public_paths = ["/health"]
+
+# ------------------------------------
+# Billing (Aether integration)
+# ------------------------------------
+
+[billing]
+enabled = true
+aether_url = "{{ env.AETHER_URL }}"
+service_api_key = "{{ env.AETHER_SERVICE_API_KEY }}"
+app_id = "synapse"
+mode = "hybrid"
+fail_mode = "open"
+
+# Modality feature keys (defaults match Aether seed values)
+# stt_feature_key = "stt_enabled"
+# tts_feature_key = "tts_enabled"
+# embeddings_feature_key = "embeddings_enabled"
+# image_gen_feature_key = "image_gen_enabled"
+
+[billing.managed_providers.openai]
+api_key = "{{ env.OPENAI_API_KEY }}"
+margin = 1.2
+
+[billing.managed_providers.anthropic]
+api_key = "{{ env.ANTHROPIC_API_KEY }}"
+margin = 1.15
+
+[billing.managed_providers.nvidia]
+api_key = "{{ env.NVIDIA_API_KEY }}"
+margin = 1.15
+
+# ------------------------------------
+# Response Cache
+# ------------------------------------
+
+[cache]
+enabled = true
+url = "{{ env.VALKEY_URL }}"
+ttl_seconds = 3600
+
+# ------------------------------------
+# Guardrails
+# ------------------------------------
+
+[guardrails]
+enabled = true
+check_input = true
+check_output = false
+
+[[guardrails.rules]]
+type = "max_input_tokens"
+name = "input-limit"
+limit = 200000
+action = "block"
+
+[[guardrails.rules]]
+type = "pii"
+name = "pii-detection"
+detect = ["ssn", "credit_card"]
+action = "warn"
+
+# ------------------------------------
+# Telemetry
+# ------------------------------------
+
+[telemetry]
+service_name = "synapse-gateway"
+
+[telemetry.exporter]
+endpoint = "{{ env.OTEL_EXPORTER_OTLP_ENDPOINT | default("http://otel-collector:4317") }}"
+protocol = "grpc"
+
+[telemetry.tracing]
+sampling_rate = 0.1
+parent_based = true
+propagation = ["trace_context"]
