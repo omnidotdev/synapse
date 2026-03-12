@@ -59,7 +59,7 @@ opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics", "trace", 
 rand = "0.9"
 redis = { version = "0.32.0", features = ["tokio-rustls-comp", "connection-manager"] }
 regex = "1.11.1"
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "rustls-tls-webpki-roots",
     "charset",
     "http2",
