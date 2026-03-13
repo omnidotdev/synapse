@@ -1,0 +1,14 @@
+{
+  "name": "synapse",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "version": "changeset version && bun scripts/syncVersion.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@changesets/changelog-github": "^0.6.0",
+    "@changesets/cli": "^2.30.0",
+    "husky": "^9.1.7"
+  }
+}

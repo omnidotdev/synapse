@@ -1,0 +1,46 @@
+[package]
+name = "synapse-mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+convert_case.workspace = true
+futures-util.workspace = true
+http.workspace = true
+indexmap.workspace = true
+itertools.workspace = true
+mini-moka.workspace = true
+reqwest.workspace = true
+rmcp = { workspace = true, features = [
+    "client",
+    "reqwest",
+    "transport-sse-client-reqwest",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+    "auth",
+    "transport-io",
+    "transport-child-process",
+    "client-side-sse",
+] }
+schemars.workspace = true
+secrecy.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+synapse-config.workspace = true
+synapse-core.workspace = true
+synapse-ratelimit.workspace = true
+synapse-telemetry.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "time", "macros"] }
+tracing.workspace = true
+
+[lints]
+workspace = true
