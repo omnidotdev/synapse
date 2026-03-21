@@ -87,7 +87,6 @@ impl EntitlementCache {
     }
 
     /// Invalidate cached per-request token limits (used by entitlement webhooks)
-    #[allow(dead_code)]
     pub fn invalidate_token_limits(&self, entity_type: &str, entity_id: &str) {
         let key = format!("{entity_type}:{entity_id}:token_limits");
         self.token_limits.invalidate(&key);

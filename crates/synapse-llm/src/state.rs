@@ -90,7 +90,7 @@ impl LlmState {
         };
 
         let (provider_name, model_id, provider, explicit_provider) =
-            self.resolve_provider(&request.model, &request).await?;
+            self.resolve_provider(&request.model, &request, &context).await?;
 
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
@@ -197,7 +197,7 @@ impl LlmState {
     > {
         let original_model = request.model.clone();
         let (provider_name, model_id, provider, explicit_provider) =
-            self.resolve_provider(&request.model, &request).await?;
+            self.resolve_provider(&request.model, &request, &context).await?;
 
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
@@ -456,11 +456,16 @@ impl LlmState {
         &self,
         model: &str,
         request: &CompletionRequest,
+        context: &RequestContext,
     ) -> Result<(String, String, Arc<dyn Provider>, bool), LlmError> {
-        // Check for virtual routing classes
+        // Check for virtual routing classes, gated on smart_routing entitlement
         if self.inner.routing_config.enabled && ROUTING_CLASSES.contains(&model) {
-            let (pn, mi, p) = self.resolve_via_routing(model, request)?;
-            return Ok((pn, mi, p, false));
+            let entitled = self.check_smart_routing_entitlement(context).await;
+            if entitled {
+                let (pn, mi, p) = self.resolve_via_routing(model, request)?;
+                return Ok((pn, mi, p, false));
+            }
+            tracing::debug!("smart routing not entitled, falling back to requested model");
         }
 
         let resolved = self.inner.router.resolve(model).await?;
@@ -579,6 +584,43 @@ impl LlmState {
         }
 
         config
+    }
+
+    /// Check whether the current user is entitled to smart routing
+    ///
+    /// Returns `true` when billing is disabled (no entitlement gate) or
+    /// when the Aether `smart_routing` entitlement grants access.
+    /// Falls back to `false` on errors or missing identity.
+    async fn check_smart_routing_entitlement(&self, context: &RequestContext) -> bool {
+        #[cfg(feature = "billing")]
+        {
+            let Some(ref client) = self.inner.billing_client else {
+                // No billing client configured — no entitlement gate
+                return true;
+            };
+            let Some(ref identity) = context.billing_identity else {
+                // No billing identity — allow routing (auth middleware
+                // already permitted the request)
+                return true;
+            };
+
+            match client
+                .check_entitlement(&identity.entity_type, &identity.entity_id, "smart_routing")
+                .await
+            {
+                Ok(resp) => resp.has_access,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to check smart_routing entitlement, denying");
+                    false
+                }
+            }
+        }
+
+        #[cfg(not(feature = "billing"))]
+        {
+            let _ = context;
+            true
+        }
     }
 
     /// Execute a non-streaming completion without failover

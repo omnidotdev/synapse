@@ -50,11 +50,13 @@ pub async fn entitlement_webhook_handler(
         state
             .cache
             .invalidate_entitlement(&body.entity_type, &body.entity_id, feature_key);
+        // Token limits depend on entitlement values, so always invalidate them
+        state.cache.invalidate_token_limits(&body.entity_type, &body.entity_id);
         tracing::debug!(
             entity_type = %body.entity_type,
             entity_id = %body.entity_id,
             feature_key = %feature_key,
-            "invalidated cached entitlement"
+            "invalidated cached entitlement and token limits"
         );
     } else {
         // No specific feature key — invalidate all known entitlements and meters
@@ -72,10 +74,11 @@ pub async fn entitlement_webhook_handler(
         for key in ["requests", "input_tokens", "output_tokens"] {
             state.cache.invalidate_usage(&body.entity_type, &body.entity_id, key);
         }
+        state.cache.invalidate_token_limits(&body.entity_type, &body.entity_id);
         tracing::debug!(
             entity_type = %body.entity_type,
             entity_id = %body.entity_id,
-            "invalidated all cached entitlements and usage meters"
+            "invalidated all cached entitlements, usage meters, and token limits"
         );
     }
 
