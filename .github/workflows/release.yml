@@ -119,6 +119,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Manifold
         uses: docker/login-action@v3
         with:
@@ -139,6 +146,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
+            ghcr.io/omnidotdev/synapse:${{ steps.version.outputs.version }}
+            ghcr.io/omnidotdev/synapse:latest
             manifold.omni.dev/omni/synapse-gateway:${{ steps.version.outputs.version }}
             manifold.omni.dev/omni/synapse-gateway:latest
           cache-from: type=gha
