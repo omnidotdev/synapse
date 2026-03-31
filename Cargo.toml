@@ -24,7 +24,7 @@ base64 = "0.22.1"
 clap = "4.6.0"
 clickhouse = { version = "0.13", features = ["lz4"] }
 convert_case = "0.8.0"
-ctor = "0.5.0"
+ctor = "0.8.0"
 dashmap = "6.1.0"
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
 duration-str = "0.17"
