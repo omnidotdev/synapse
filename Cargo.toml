@@ -92,7 +92,7 @@ synapse-server = { path = "crates/synapse-server" }
 synapse-telemetry = { path = "crates/synapse-telemetry" }
 stt = { version = "0.1.0", path = "crates/stt" }
 tts = { version = "0.1.0", path = "crates/tts" }
-tantivy = "0.25.0"
+tantivy = "0.26.0"
 temp-env = "0.3"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
