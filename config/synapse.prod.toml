@@ -237,8 +237,8 @@ public_paths = ["/health"]
 
 [billing]
 enabled = true
-aether_url = "{{ env.AETHER_URL }}"
-service_api_key = "{{ env.AETHER_SERVICE_API_KEY }}"
+aether_url = "{{ env.BILLING_URL }}"
+service_api_key = "{{ env.BILLING_SERVICE_API_KEY }}"
 app_id = "synapse"
 mode = "hybrid"
 fail_mode = "open"
