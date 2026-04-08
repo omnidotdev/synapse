@@ -72,7 +72,7 @@ impl Server {
 
             // Attach usage recorder for LLM
             let recorder_client = synapse_billing::AetherClient::new(
-                billing_config.aether_url.clone(),
+                billing_config.billing_url.clone(),
                 billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
@@ -87,7 +87,7 @@ impl Server {
 
             // Attach billing client for pre-request credit checks (LLM)
             let credit_client = synapse_billing::AetherClient::new(
-                billing_config.aether_url.clone(),
+                billing_config.billing_url.clone(),
                 billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
@@ -96,12 +96,12 @@ impl Server {
             // Wire billing into STT
             {
                 let client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
@@ -120,12 +120,12 @@ impl Server {
             // Wire billing into TTS
             {
                 let client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
@@ -144,12 +144,12 @@ impl Server {
             // Wire billing into embeddings
             {
                 let client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
@@ -168,12 +168,12 @@ impl Server {
             // Wire billing into image generation
             {
                 let client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
-                    billing_config.aether_url.clone(),
+                    billing_config.billing_url.clone(),
                     billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
@@ -295,7 +295,7 @@ impl Server {
             && billing_config.enabled
         {
             let aether_client = synapse_billing::AetherClient::new(
-                billing_config.aether_url.clone(),
+                billing_config.billing_url.clone(),
                 billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;

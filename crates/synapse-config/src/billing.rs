@@ -14,8 +14,9 @@ pub struct BillingConfig {
     /// Whether billing is enabled
     #[serde(default)]
     pub enabled: bool,
-    /// Base URL for the Aether billing API
-    pub aether_url: Url,
+    /// Base URL for the billing API
+    #[serde(alias = "aether_url")]
+    pub billing_url: Url,
     /// Service API key for authenticating with Aether
     pub service_api_key: SecretString,
     /// Aether application identifier
@@ -217,7 +218,7 @@ mod tests {
     fn deserialize_minimal_config() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
         "#;
@@ -235,7 +236,7 @@ mod tests {
     fn deserialize_managed_mode() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
             mode = "managed"
@@ -261,7 +262,7 @@ mod tests {
     fn deserialize_custom_meters() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
 
@@ -283,7 +284,7 @@ mod tests {
     fn validate_managed_without_providers_fails() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
             mode = "managed"
@@ -297,7 +298,7 @@ mod tests {
     fn validate_byok_without_providers_succeeds() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
         "#;
@@ -319,7 +320,7 @@ mod tests {
     fn default_modality_feature_keys() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
         "#;
@@ -335,7 +336,7 @@ mod tests {
     fn modality_feature_key_mapping() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
         "#;
@@ -371,7 +372,7 @@ mod tests {
     fn deserialize_tier_margins() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
 
@@ -392,7 +393,7 @@ mod tests {
     fn tier_margins_default_empty() {
         let toml = r#"
             enabled = true
-            aether_url = "https://aether.omni.dev/"
+            billing_url = "https://billing.omni.dev/"
             service_api_key = "sk-test-123"
             app_id = "synapse"
         "#;
