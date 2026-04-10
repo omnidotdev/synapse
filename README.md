@@ -1,32 +1,36 @@
+<div align="center">
+
 # Synapse
 
-Unified AI router for LLM, embeddings, image generation, MCP, STT, and TTS provider management. Configure your API keys once, route all AI traffic through a single gateway.
+Unified AI router for LLM, embeddings, image generation, MCP, STT, and TTS
 
-## Features
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 
-- **Multi-Provider LLM Routing** -- OpenAI, Anthropic, Google, AWS Bedrock with automatic failover
-- **Smart Model Selection** -- Threshold, cost, cascade, score, and ONNX-based routing strategies
-- **Embeddings & Image Generation** -- Unified endpoints for embedding and image generation providers
-- **MCP Aggregation** -- Aggregate Model Context Protocol servers through a single endpoint
-- **STT/TTS** -- Speech-to-text (Whisper, Deepgram) and text-to-speech (OpenAI TTS, ElevenLabs)
-- **Rate Limiting** -- In-memory and Redis-backed rate limiting with per-client policies
-- **Authentication** -- API key validation, OAuth2/JWT with JWKS, CSRF protection
-- **Billing Integration** -- Usage metering, managed margins, credit-based billing via Aether
-- **Telemetry** -- OpenTelemetry metrics, tracing, and structured logs
+[Website](https://synapse.omni.dev) | [Discord](https://discord.gg/omnidotdev) | [GitHub](https://github.com/omnidotdev/synapse)
 
-## Quick Start
+</div>
 
-### Install
+## Overview
+
+Synapse is a Rust gateway that routes AI traffic through a single endpoint. Configure your provider keys once, then point any OpenAI or Anthropic SDK at your Synapse instance. Synapse handles provider selection, automatic failover, smart routing, rate limiting, MCP aggregation, and usage metering across LLM, embedding, image, STT, and TTS providers.
+
+## Installation
+
+### From source
 
 ```bash
-# Build from source
-cargo build --release -p synapse
+cargo install --path synapse
+```
 
-# Or use Docker
+### Docker
+
+```bash
 docker pull ghcr.io/omnidotdev/synapse:latest
 ```
 
-### Configure
+## Quick start
+
+### 1. Configure
 
 Create `synapse.toml`:
 
@@ -43,15 +47,15 @@ type = "openai"
 api_key = "{{ env.OPENAI_API_KEY }}"
 ```
 
-API keys support `{{ env.VAR }}` template syntax for environment variable substitution.
+API keys support `{{ env.VAR }}` template syntax for environment variable substitution. See `config/synapse.dev.toml` for a full development configuration.
 
-### Run
+### 2. Run
 
 ```bash
-./target/release/synapse --config synapse.toml
+synapse --config synapse.toml
 ```
 
-### Send a Request
+### 3. Send a request
 
 ```bash
 # OpenAI-compatible
@@ -61,98 +65,25 @@ curl http://localhost:6000/v1/chat/completions \
     "model": "claude-sonnet-4-20250514",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
-
-# Anthropic-compatible
-curl http://localhost:6000/v1/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 1024,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
 ```
 
-Works with existing OpenAI and Anthropic SDKs -- just point `base_url` at your Synapse instance.
+Works with existing OpenAI and Anthropic SDKs, just point `base_url` at your Synapse instance.
 
-## Supported Providers
+## Development
 
-| Modality | Providers |
-|----------|-----------|
-| LLM | Anthropic, OpenAI, Google, AWS Bedrock |
-| Embeddings | OpenAI |
-| Image Generation | OpenAI (DALL-E) |
-| STT | OpenAI Whisper, Deepgram |
-| TTS | OpenAI TTS, ElevenLabs |
-| MCP | Any STDIO, SSE, or StreamableHTTP server |
-
-## Routing Strategies
-
-Synapse can automatically select the best model for each request using virtual model names (`auto`, `fast`, `best`, `cheap`):
-
-| Strategy | Description |
-|----------|-------------|
-| **Threshold** | Route by query complexity -- cheap models for simple queries, strong models for complex ones |
-| **Cost** | Maximize quality within a per-request cost budget |
-| **Cascade** | Try a cheap model first, escalate to a stronger model on low-confidence responses |
-| **Score** | Multi-objective optimization balancing quality, cost, and latency |
-| **ONNX** | ML-based classification using a trained ONNX model |
-
-## Billing Modes
-
-| Mode | Description |
-|------|-------------|
-| **BYOK** | Bring your own provider API keys -- no token metering |
-| **Managed** | Synapse provides API keys and meters usage with configurable margins |
-| **Credits** | Prepaid credit balance deducted per request based on model pricing |
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | LLM chat (OpenAI-compatible, streaming) |
-| `/v1/messages` | POST | LLM chat (Anthropic-compatible, streaming) |
-| `/v1/models` | GET | List available models |
-| `/v1/embeddings` | POST | Generate embeddings |
-| `/v1/images/generations` | POST | Generate images |
-| `/v1/audio/transcriptions` | POST | Speech-to-text |
-| `/v1/audio/speech` | POST | Text-to-speech |
-| `/mcp/tools/list` | POST | List MCP tools |
-| `/mcp/tools/call` | POST | Execute an MCP tool |
-| `/health` | GET | Health check |
-
-## Configuration
-
-See the [full documentation](https://omni.dev/grid/synapse/configuration) for all configuration options including:
-
-- Server settings (TLS, CORS, health endpoints)
-- Provider configuration per modality
-- Smart routing and model profiles
-- Rate limiting (memory and Redis)
-- Failover and circuit breaker
-- Authentication (API keys, JWT/JWKS)
-- Billing and usage metering
-- OpenTelemetry exporters
-
-## Architecture
-
-```
-┌──────────────────────────────┐
-│           Synapse            │ :6000
-│      Unified AI Router       │
-├──────────────────────────────┤
-│  ┌───┬───┬───┬───┬───┬───┐  │
-│  │LLM│EMB│IMG│MCP│STT│TTS│  │
-│  └─┬─┴─┬─┴─┬─┴─┬─┴─┬─┴─┬─┘  │
-└────┼───┼───┼───┼───┼───┼────┘
-     │   │   │   │   │   │
-     ▼   ▼   ▼   ▼   ▼   ▼
- Anthropic OpenAI Google Bedrock
- Deepgram  ElevenLabs  MCP Servers
+```bash
+cargo build
+cargo test
+cargo clippy
+cargo run -p synapse -- --config config/synapse.dev.toml
 ```
 
-## Contributing
+## Ecosystem
 
-See the [contributing guide](/.github/CONTRIBUTING.md).
+- **[Beacon](https://github.com/omnidotdev/beacon)** routes its LLM, STT/TTS, and tool execution through Synapse
+- **[Omni CLI](https://github.com/omnidotdev/cli)** uses Synapse for model discovery and unified provider access
+- **[Aether](https://github.com/omnidotdev/aether)** handles billing metering for managed and credit billing modes
+- **[Warden](https://github.com/omnidotdev/warden)** enforces authorization on management endpoints
 
 ## License
 

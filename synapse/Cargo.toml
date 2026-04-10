@@ -2,10 +2,15 @@
 name = "synapse"
 version = "0.0.0"
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
 license.workspace = true
 homepage.workspace = true
-keywords.workspace = true
 repository.workspace = true
+readme = "../README.md"
+keywords.workspace = true
+categories.workspace = true
 default-run = "synapse"
 
 [dependencies]

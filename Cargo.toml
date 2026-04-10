@@ -4,10 +4,14 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.94"
+authors = ["Omni <team@omni.dev>"]
+description = "Unified AI router for LLM, embeddings, image generation, MCP, STT, and TTS"
 license = "Apache-2.0"
 homepage = "https://synapse.omni.dev"
+repository = "https://github.com/omnidotdev/synapse"
 keywords = ["synapse", "llm", "ai", "mcp", "stt", "tts"]
-repository = "https://github.com/omnidotdev/synapse-server"
+categories = ["web-programming", "api-bindings", "command-line-utilities"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
