@@ -500,6 +500,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_credits_sufficient() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/test-app/user/usr_123/check"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": true,
+                "balance": 50.0
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let result = client.check_credits("user", "usr_123", 10.0).await;
+
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert!(resp.sufficient);
+        assert!((resp.balance - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn check_credits_insufficient() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/test-app/user/usr_123/check"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": false,
+                "balance": 0.5
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let result = client.check_credits("user", "usr_123", 10.0).await;
+
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert!(!resp.sufficient);
+        assert!((resp.balance - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn check_credits_unreachable_returns_request_error() {
+        // Point at a port that is not listening to simulate Aether being down
+        let client = test_client("http://127.0.0.1:1/");
+
+        let result = client.check_credits("user", "usr_123", 10.0).await;
+
+        assert!(result.is_err());
+        // The error should be a Request variant (network error), which is
+        // what the fail_mode logic in LlmState branches on
+        assert!(matches!(result.unwrap_err(), BillingError::Request(_)));
+    }
+
+    #[tokio::test]
+    async fn check_credits_server_error_returns_api_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/test-app/user/usr_123/check"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let result = client.check_credits("user", "usr_123", 10.0).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BillingError::Api { status: 503, .. }));
+    }
+
+    #[tokio::test]
     async fn health_check_succeeds() {
         let server = MockServer::start().await;
 

@@ -77,5 +77,9 @@ fn cache_key(name: &str, server_type: &McpServerType) -> String {
         }
     }
 
-    format!("{:x}", hasher.finalize())
+    hasher.finalize().iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }

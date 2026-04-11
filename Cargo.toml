@@ -18,20 +18,20 @@ anyhow = "1.0.102"
 async-trait = "0.1.89"
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
-aws-sdk-bedrock = { version = "1.138", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = { version = "1.128", features = ["behavior-version-latest"] }
+aws-sdk-bedrock = { version = "1.140", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1.129", features = ["behavior-version-latest"] }
 aws-smithy-runtime-api = "1.11"
 aws-smithy-types = "1.4"
 axum = { version = "0.8.8", features = ["macros"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22.1"
 clap = "4.6.0"
-clickhouse = { version = "0.13", features = ["lz4"] }
-convert_case = "0.8.0"
-ctor = "0.5.0"
+clickhouse = { version = "0.15", features = ["lz4"] }
+convert_case = "0.11.0"
+ctor = "0.9.1"
 dashmap = "6.1.0"
-deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
-duration-str = "0.17"
+deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
+duration-str = "0.21"
 eventsource-stream = "0.2.3"
 fast-glob = "1.0.1"
 futures = "0.3.32"
@@ -40,9 +40,9 @@ governor = { version = "0.10", features = ["std", "jitter"] }
 http = "1.4.0"
 http-body = "1.0.1"
 http-body-util = "0.1"
-indexmap = "2.13.0"
+indexmap = "2.14.0"
 indoc = "2.0.7"
-insta = "1.46.3"
+insta = "1.47.2"
 itertools = "0.14.0"
 jiff = "0.2.23"
 jwt-compact = "0.8.0"
@@ -60,8 +60,8 @@ opentelemetry-otlp = { version = "0.31", features = [
 ] }
 opentelemetry-semantic-conventions = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics", "trace", "rt-tokio"] }
-rand = "0.9"
-redis = { version = "1.0", features = ["tokio-rustls-comp", "connection-manager"] }
+rand = "0.10"
+redis = { version = "1.2", features = ["tokio-rustls-comp", "connection-manager"] }
 regex = "1.12.3"
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
@@ -70,15 +70,15 @@ reqwest = { version = "0.13", default-features = false, features = [
     "hickory-dns",
     "query",
 ] }
-rmcp = "1.2.0"
+rmcp = "1.4.0"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1.2"
 secrecy = "0.10.3"
 serde = "1.0.228"
 serde_json = "1.0"
 serde_with = "3"
-sha2 = "0.10"
-strum = { version = "0.27", features = ["derive"] }
+sha2 = "0.11"
+strum = { version = "0.28", features = ["derive"] }
 synapse-auth = { path = "crates/synapse-auth" }
 synapse-billing = { path = "crates/synapse-billing" }
 synapse-cache = { path = "crates/synapse-cache" }
@@ -96,14 +96,14 @@ synapse-server = { path = "crates/synapse-server" }
 synapse-telemetry = { path = "crates/synapse-telemetry" }
 stt = { version = "0.1.0", path = "crates/stt" }
 tts = { version = "0.1.0", path = "crates/tts" }
-tantivy = "0.25.0"
+tantivy = "0.26.0"
 temp-env = "0.3"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tiktoken-rs = "0.7"
-tokio = { version = "1.50.0", default-features = false }
+tiktoken-rs = "0.11"
+tokio = { version = "1.51.1", default-features = false }
 tokio-util = "0.7"
-toml = "1.0"
+toml = "1.1"
 tonic = "0.14"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
@@ -112,7 +112,7 @@ tower = "0.5.3"
 tower-http = "0.6.8"
 agent-core = "0.1.0"
 url = "2.5.8"
-uuid = "1.22.0"
+uuid = "1.23.0"
 
 [profile.release]
 lto = true

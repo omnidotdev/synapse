@@ -91,7 +91,7 @@ impl Server {
                 billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
-            llm_state.set_billing_client(credit_client);
+            llm_state.set_billing_client(credit_client, billing_config.fail_mode.clone());
 
             // Wire billing into STT
             {
@@ -113,7 +113,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let stt = Arc::get_mut(&mut stt_state).expect("STT state not yet shared");
-                stt.set_billing_client(client);
+                stt.set_billing_client(client, billing_config.fail_mode.clone());
                 stt.set_usage_recorder(recorder);
             }
 
@@ -137,7 +137,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let tts = Arc::get_mut(&mut tts_state).expect("TTS state not yet shared");
-                tts.set_billing_client(client);
+                tts.set_billing_client(client, billing_config.fail_mode.clone());
                 tts.set_usage_recorder(recorder);
             }
 
@@ -161,7 +161,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let emb = Arc::get_mut(&mut embeddings_state).expect("embeddings state not yet shared");
-                emb.set_billing_client(client);
+                emb.set_billing_client(client, billing_config.fail_mode.clone());
                 emb.set_usage_recorder(recorder);
             }
 
@@ -185,7 +185,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let img = Arc::get_mut(&mut imagegen_state).expect("imagegen state not yet shared");
-                img.set_billing_client(client);
+                img.set_billing_client(client, billing_config.fail_mode.clone());
                 img.set_usage_recorder(recorder);
             }
         }
@@ -306,6 +306,7 @@ impl Server {
                 let webhook_state = webhook::WebhookState {
                     cache: ent_state.cache(),
                     gateway_secret: auth_config.gateway_secret.clone(),
+                    billing_config: billing_config.clone(),
                 };
                 app = app.route(
                     "/webhooks/entitlements",

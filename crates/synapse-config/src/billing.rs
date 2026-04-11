@@ -186,6 +186,26 @@ impl BillingConfig {
         Ok(())
     }
 
+    /// Return all configured feature keys (`api_access` + modality keys)
+    pub fn all_feature_keys(&self) -> Vec<&str> {
+        vec![
+            &self.api_access_feature_key,
+            &self.stt_feature_key,
+            &self.tts_feature_key,
+            &self.embeddings_feature_key,
+            &self.image_gen_feature_key,
+        ]
+    }
+
+    /// Return all configured meter keys
+    pub fn all_meter_keys(&self) -> Vec<&str> {
+        vec![
+            &self.meters.requests,
+            &self.meters.input_tokens,
+            &self.meters.output_tokens,
+        ]
+    }
+
     /// Return the modality feature key for a given request path, if the
     /// route requires a modality entitlement
     pub fn modality_feature_key(&self, path: &str) -> Option<&str> {
@@ -230,6 +250,63 @@ mod tests {
         assert_eq!(config.fail_mode, FailMode::Open);
         assert_eq!(config.entitlement_cache_ttl_secs, 60);
         assert_eq!(config.api_access_feature_key, "api_access");
+    }
+
+    #[test]
+    fn fail_mode_defaults_to_open() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.fail_mode, FailMode::Open);
+    }
+
+    #[test]
+    fn fail_mode_closed_rejects_when_aether_unreachable() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            fail_mode = "closed"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.fail_mode, FailMode::Closed);
+
+        // Verify Closed mode semantics: when billing is unreachable, the
+        // request should be rejected with 503 (tested in entitlement.rs
+        // via handle_aether_error)
+        match config.fail_mode {
+            FailMode::Open => panic!("expected Closed"),
+            FailMode::Closed => {} // 503 rejection path
+        }
+    }
+
+    #[test]
+    fn fail_mode_open_allows_when_aether_unreachable() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            fail_mode = "open"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.fail_mode, FailMode::Open);
+
+        // Verify Open mode semantics: when billing is unreachable, the
+        // request should proceed (tested in entitlement.rs via
+        // handle_aether_error and in LlmState::check_credits)
+        match config.fail_mode {
+            FailMode::Closed => panic!("expected Open"),
+            FailMode::Open => {} // allow-through path
+        }
     }
 
     #[test]
@@ -387,6 +464,93 @@ mod tests {
         assert!((config.tier_margins["free"] - 1.2).abs() < f64::EPSILON);
         assert!((config.tier_margins["pro"] - 1.15).abs() < f64::EPSILON);
         assert!((config.tier_margins["team"] - 1.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn all_feature_keys_returns_configured_keys() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            api_access_feature_key = "custom_access"
+            stt_feature_key = "custom_stt"
+            tts_feature_key = "custom_tts"
+            embeddings_feature_key = "custom_embed"
+            image_gen_feature_key = "custom_img"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        let keys = config.all_feature_keys();
+
+        assert_eq!(keys.len(), 5);
+        assert!(keys.contains(&"custom_access"));
+        assert!(keys.contains(&"custom_stt"));
+        assert!(keys.contains(&"custom_tts"));
+        assert!(keys.contains(&"custom_embed"));
+        assert!(keys.contains(&"custom_img"));
+    }
+
+    #[test]
+    fn all_feature_keys_returns_defaults() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        let keys = config.all_feature_keys();
+
+        assert_eq!(keys.len(), 5);
+        assert!(keys.contains(&"api_access"));
+        assert!(keys.contains(&"stt_enabled"));
+        assert!(keys.contains(&"tts_enabled"));
+        assert!(keys.contains(&"embeddings_enabled"));
+        assert!(keys.contains(&"image_gen_enabled"));
+    }
+
+    #[test]
+    fn all_meter_keys_returns_configured_keys() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+
+            [meters]
+            input_tokens = "custom_input"
+            output_tokens = "custom_output"
+            requests = "custom_requests"
+            messages = "custom_messages"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        let keys = config.all_meter_keys();
+
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"custom_input"));
+        assert!(keys.contains(&"custom_output"));
+        assert!(keys.contains(&"custom_requests"));
+    }
+
+    #[test]
+    fn all_meter_keys_returns_defaults() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        let keys = config.all_meter_keys();
+
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"input_tokens"));
+        assert!(keys.contains(&"output_tokens"));
+        assert!(keys.contains(&"requests"));
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub enum TtsError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    /// Billing service is unavailable and fail-closed mode is configured
+    #[error("billing service unavailable")]
+    BillingUnavailable,
+
     /// Internal server error
     /// If Some(message), it came from a provider and can be shown
     /// If None, it's an internal error and should not leak details
@@ -57,6 +61,7 @@ impl TtsError {
                 429 => StatusCode::TOO_MANY_REQUESTS,
                 _ => StatusCode::BAD_GATEWAY,
             },
+            Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ConfigError(_) | Self::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -68,6 +73,7 @@ impl TtsError {
             Self::AuthenticationFailed(_) => "authentication_error",
             Self::ProviderNotFound(_) => "not_found_error",
             Self::ConnectionError(_) | Self::ProviderApiError { .. } => "api_error",
+            Self::BillingUnavailable => "billing_unavailable_error",
             Self::ConfigError(_) | Self::InternalError(_) => "internal_error",
         }
     }
@@ -75,6 +81,7 @@ impl TtsError {
     /// Message that is safe to expose to API consumers
     pub fn client_message(&self) -> String {
         match self {
+            Self::BillingUnavailable => "billing service unavailable".to_string(),
             Self::InternalError(Some(provider_msg)) => provider_msg.clone(),
             Self::InternalError(None) => "Internal server error".to_string(),
             _ => self.to_string(),

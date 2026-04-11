@@ -40,6 +40,10 @@ pub enum LlmError {
     #[error("insufficient credits: {message}")]
     InsufficientCredits { message: String },
 
+    /// Billing service is unavailable and fail-closed mode is configured
+    #[error("billing service unavailable")]
+    BillingUnavailable,
+
     /// Unexpected internal error
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
@@ -53,7 +57,11 @@ impl LlmError {
     pub const fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Upstream(_) | Self::Streaming(_) | Self::RateLimited { .. } | Self::Internal(_)
+            Self::Upstream(_)
+                | Self::Streaming(_)
+                | Self::RateLimited { .. }
+                | Self::BillingUnavailable
+                | Self::Internal(_)
         )
     }
 }
@@ -64,6 +72,7 @@ impl HttpError for LlmError {
             Self::ModelNotFound { .. } | Self::ProviderNotFound { .. } => StatusCode::NOT_FOUND,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Streaming(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -80,12 +89,14 @@ impl HttpError for LlmError {
             Self::Unauthorized => "authentication_error",
             Self::RateLimited { .. } => "rate_limit_error",
             Self::InsufficientCredits { .. } => "insufficient_credits_error",
+            Self::BillingUnavailable => "billing_unavailable_error",
             Self::Internal(_) => "internal_error",
         }
     }
 
     fn client_message(&self) -> String {
         match self {
+            Self::BillingUnavailable => "billing service unavailable".to_owned(),
             Self::Internal(_) => "an internal error occurred".to_owned(),
             other => other.to_string(),
         }

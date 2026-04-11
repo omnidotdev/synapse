@@ -82,7 +82,7 @@ impl ToolIndex {
             .map_err(|e| McpError::Internal(anyhow::anyhow!("invalid search query: {e}")))?;
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit))
+            .search(&query, &TopDocs::with_limit(limit).order_by_score())
             .map_err(|e| McpError::Internal(anyhow::anyhow!("search failed: {e}")))?;
 
         let field_err = |name| McpError::Internal(anyhow::anyhow!("missing schema field: {name}"));

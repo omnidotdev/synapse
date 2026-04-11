@@ -17,6 +17,7 @@ use crate::entitlement_cache::EntitlementCache;
 pub struct WebhookState {
     pub cache: EntitlementCache,
     pub gateway_secret: SecretString,
+    pub billing_config: synapse_config::BillingConfig,
 }
 
 /// Incoming entitlement change payload from Aether
@@ -59,19 +60,13 @@ pub async fn entitlement_webhook_handler(
             "invalidated cached entitlement and token limits"
         );
     } else {
-        // No specific feature key — invalidate all known entitlements and meters
-        for key in [
-            "api_access",
-            "stt_enabled",
-            "tts_enabled",
-            "embeddings_enabled",
-            "image_gen_enabled",
-        ] {
+        // No specific feature key -- invalidate all configured entitlements and meters
+        for key in state.billing_config.all_feature_keys() {
             state
                 .cache
                 .invalidate_entitlement(&body.entity_type, &body.entity_id, key);
         }
-        for key in ["requests", "input_tokens", "output_tokens"] {
+        for key in state.billing_config.all_meter_keys() {
             state.cache.invalidate_usage(&body.entity_type, &body.entity_id, key);
         }
         state.cache.invalidate_token_limits(&body.entity_type, &body.entity_id);

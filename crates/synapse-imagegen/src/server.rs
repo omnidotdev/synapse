@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use synapse_config::{ImageGenProviderConfig, ImageGenProviderType};
+use synapse_config::{FailMode, ImageGenProviderConfig, ImageGenProviderType};
 use synapse_core::RequestContext;
 
 use crate::{
@@ -17,6 +17,9 @@ pub struct Server {
     /// Billing client for pre-request credit checks
     #[cfg(feature = "billing")]
     billing_client: Option<synapse_billing::AetherClient>,
+    /// Behavior when billing service is unreachable
+    #[cfg(feature = "billing")]
+    billing_fail_mode: FailMode,
 }
 
 impl Server {
@@ -32,8 +35,9 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient) {
+    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
         self.billing_client = Some(client);
+        self.billing_fail_mode = fail_mode;
     }
 
     /// Generate images using the appropriate provider
@@ -131,14 +135,24 @@ impl Server {
                 }
                 Ok(())
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    entity_id = %identity.entity_id,
-                    "credit check failed, allowing image generation request"
-                );
-                Ok(())
-            }
+            Err(e) => match self.billing_fail_mode {
+                FailMode::Open => {
+                    tracing::warn!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, allowing image generation request (fail-open mode)"
+                    );
+                    Ok(())
+                }
+                FailMode::Closed => {
+                    tracing::error!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, rejecting image generation request (fail-closed mode)"
+                    );
+                    Err(ImageGenError::BillingUnavailable)
+                }
+            },
         }
     }
 
@@ -263,6 +277,8 @@ impl<'a> ImageGenServerBuilder<'a> {
             usage_recorder: None,
             #[cfg(feature = "billing")]
             billing_client: None,
+            #[cfg(feature = "billing")]
+            billing_fail_mode: FailMode::default(),
         })
     }
 }

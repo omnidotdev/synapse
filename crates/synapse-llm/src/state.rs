@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use futures_util::{Stream, StreamExt};
 use secrecy::SecretString;
-use synapse_config::{FailoverConfig, LlmConfig, LlmProviderType, RoutingConfig};
+use synapse_config::{FailMode, FailoverConfig, LlmConfig, LlmProviderType, RoutingConfig};
 use synapse_core::RequestContext;
 use synapse_routing::{FeedbackTracker, ModelRegistry, RequestFeedback, StrategyRegistry};
 
@@ -48,6 +48,9 @@ pub(crate) struct LlmStateInner {
     /// Billing client for pre-request credit checks (billing feature only)
     #[cfg(feature = "billing")]
     pub(crate) billing_client: Option<synapse_billing::AetherClient>,
+    /// Behavior when billing service is unreachable
+    #[cfg(feature = "billing")]
+    pub(crate) billing_fail_mode: FailMode,
     /// Response cache (cache feature only)
     #[cfg(feature = "cache")]
     pub(crate) response_cache: Option<synapse_cache::ResponseCache>,
@@ -390,6 +393,8 @@ impl LlmState {
                 usage_recorder: None,
                 #[cfg(feature = "billing")]
                 billing_client: None,
+                #[cfg(feature = "billing")]
+                billing_fail_mode: FailMode::default(),
                 #[cfg(feature = "cache")]
                 response_cache: None,
             }),
@@ -447,10 +452,10 @@ impl LlmState {
     ///
     /// Panics if called after the inner `Arc` has been cloned
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient) {
-        Arc::get_mut(&mut self.inner)
-            .expect("set_billing_client must be called before state is shared")
-            .billing_client = Some(client);
+    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+        let inner = Arc::get_mut(&mut self.inner).expect("set_billing_client must be called before state is shared");
+        inner.billing_client = Some(client);
+        inner.billing_fail_mode = fail_mode;
     }
 
     /// Attach a response cache for LLM completions
@@ -1231,15 +1236,24 @@ impl LlmState {
                 }
                 Ok(())
             }
-            Err(e) => {
-                // Log but don't block the request if the credit check fails
-                tracing::warn!(
-                    error = %e,
-                    entity_id = %identity.entity_id,
-                    "credit check failed, allowing request"
-                );
-                Ok(())
-            }
+            Err(e) => match self.inner.billing_fail_mode {
+                FailMode::Open => {
+                    tracing::warn!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, allowing request (fail-open mode)"
+                    );
+                    Ok(())
+                }
+                FailMode::Closed => {
+                    tracing::error!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, rejecting request (fail-closed mode)"
+                    );
+                    Err(LlmError::BillingUnavailable)
+                }
+            },
         }
     }
 

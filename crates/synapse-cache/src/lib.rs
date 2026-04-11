@@ -122,7 +122,11 @@ impl ResponseCache {
 pub fn compute_cache_key<T: serde::Serialize>(request: &T) -> String {
     let json = serde_json::to_string(request).unwrap_or_default();
     let hash = Sha256::digest(json.as_bytes());
-    format!("{hash:x}")
+    hash.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 /// Check whether a request is cacheable

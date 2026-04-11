@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use synapse_config::{SttProviderConfig, SttProviderType};
+use synapse_config::{FailMode, SttProviderConfig, SttProviderType};
 
 use crate::{
     error::SttError,
@@ -17,6 +17,9 @@ pub struct Server {
     /// Billing client for pre-request credit checks
     #[cfg(feature = "billing")]
     billing_client: Option<synapse_billing::AetherClient>,
+    /// Behavior when billing service is unreachable
+    #[cfg(feature = "billing")]
+    billing_fail_mode: FailMode,
 }
 
 impl Server {
@@ -32,8 +35,9 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient) {
+    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
         self.billing_client = Some(client);
+        self.billing_fail_mode = fail_mode;
     }
 
     /// Transcribe audio using the appropriate provider
@@ -128,14 +132,24 @@ impl Server {
                 }
                 Ok(())
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    entity_id = %identity.entity_id,
-                    "credit check failed, allowing STT request"
-                );
-                Ok(())
-            }
+            Err(e) => match self.billing_fail_mode {
+                FailMode::Open => {
+                    tracing::warn!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, allowing STT request (fail-open mode)"
+                    );
+                    Ok(())
+                }
+                FailMode::Closed => {
+                    tracing::error!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, rejecting STT request (fail-closed mode)"
+                    );
+                    Err(SttError::BillingUnavailable)
+                }
+            },
         }
     }
 
@@ -263,6 +277,8 @@ impl<'a> SttServerBuilder<'a> {
             usage_recorder: None,
             #[cfg(feature = "billing")]
             billing_client: None,
+            #[cfg(feature = "billing")]
+            billing_fail_mode: FailMode::default(),
         })
     }
 }
