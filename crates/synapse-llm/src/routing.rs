@@ -163,15 +163,21 @@ impl ModelRouter {
         }
         drop(known_models);
 
-        // Third pass: if no known models yet, try the first provider that
-        // doesn't exclude the model
-        for (provider_name, model_config) in &self.providers {
-            if is_model_allowed(model_config, model) {
-                return Ok(ResolvedModel {
-                    provider_name: provider_name.clone(),
-                    model_id: model.to_owned(),
-                    explicit_provider: false,
-                });
+        // Third pass: if no known models yet (discovery incomplete), try the
+        // first provider that doesn't exclude the model. Once discovery has
+        // populated model lists, unknown models should be rejected locally
+        // rather than forwarded to an upstream that will 404.
+        let has_discovered_models = self.known_models.read().await.values().any(|models| !models.is_empty());
+
+        if !has_discovered_models {
+            for (provider_name, model_config) in &self.providers {
+                if is_model_allowed(model_config, model) {
+                    return Ok(ResolvedModel {
+                        provider_name: provider_name.clone(),
+                        model_id: model.to_owned(),
+                        explicit_provider: false,
+                    });
+                }
             }
         }
 

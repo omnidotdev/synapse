@@ -36,6 +36,11 @@ async fn openai_chat_completions(
     Json(wire_request): Json<OpenAiRequest>,
 ) -> Response {
     let is_stream = wire_request.stream.unwrap_or(false);
+
+    if wire_request.messages.is_empty() {
+        return error_to_openai_response(LlmError::InvalidRequest("messages array cannot be empty".to_owned()));
+    }
+
     let internal_request: CompletionRequest = wire_request.into();
 
     if is_stream {
@@ -145,6 +150,11 @@ async fn anthropic_messages(
     Json(wire_request): Json<AnthropicRequest>,
 ) -> Response {
     let is_stream = wire_request.stream.unwrap_or(false);
+
+    if wire_request.messages.is_empty() {
+        return error_to_anthropic_response(LlmError::InvalidRequest("messages array cannot be empty".to_owned()));
+    }
+
     let internal_request: CompletionRequest = wire_request.into();
 
     if is_stream {
