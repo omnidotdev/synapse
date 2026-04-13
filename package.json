@@ -1,0 +1,20 @@
+{
+  "name": "synapse",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "author": "Omni <team@omni.dev>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omnidotdev/synapse.git"
+  },
+  "scripts": {
+    "version": "changeset version && bun scripts/syncVersion.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.11",
+    "@changesets/changelog-github": "^0.6.0",
+    "@changesets/cli": "^2.30.0",
+    "husky": "^9.1.7"
+  }
+}
