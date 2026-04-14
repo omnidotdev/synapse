@@ -29,14 +29,20 @@ pub struct CachedTokenLimits {
 
 /// In-memory TTL cache for entitlement and usage checks
 ///
-/// Reduces load on Aether by caching positive results for a
-/// configurable duration
+/// Reduces load on Aether by caching results for a configurable duration.
+/// Positive results use the full TTL; negative usage results use a shorter
+/// TTL (5s) to prevent thundering herd on rate-limited users while still
+/// allowing limit resets to propagate quickly.
 #[derive(Clone)]
 pub struct EntitlementCache {
     entitlements: Cache<String, CachedEntitlement>,
     usage: Cache<String, CachedUsageCheck>,
+    usage_denied: Cache<String, CachedUsageCheck>,
     token_limits: Cache<String, CachedTokenLimits>,
 }
+
+/// Short TTL for negative usage results to prevent thundering herd
+const DENIED_USAGE_TTL: Duration = Duration::from_secs(5);
 
 impl EntitlementCache {
     /// Create a new cache with the given TTL in seconds
@@ -46,6 +52,10 @@ impl EntitlementCache {
         Self {
             entitlements: Cache::builder().max_capacity(10_000).time_to_live(ttl).build(),
             usage: Cache::builder().max_capacity(10_000).time_to_live(ttl).build(),
+            usage_denied: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(DENIED_USAGE_TTL)
+                .build(),
             token_limits: Cache::builder().max_capacity(10_000).time_to_live(ttl).build(),
         }
     }
@@ -62,16 +72,22 @@ impl EntitlementCache {
         self.entitlements.insert(key, result);
     }
 
-    /// Look up a cached usage check
+    /// Look up a cached usage check (checks both positive and negative caches)
     pub fn get_usage(&self, entity_type: &str, entity_id: &str, meter_key: &str) -> Option<CachedUsageCheck> {
         let key = format!("{entity_type}:{entity_id}:{meter_key}");
-        self.usage.get(&key)
+        self.usage.get(&key).or_else(|| self.usage_denied.get(&key))
     }
 
-    /// Cache a usage check result
+    /// Cache a usage check result.
+    /// Positive results use the full TTL; negative results use a short TTL
+    /// to prevent thundering herd while allowing limit resets to propagate.
     pub fn put_usage(&self, entity_type: &str, entity_id: &str, meter_key: &str, result: CachedUsageCheck) {
         let key = format!("{entity_type}:{entity_id}:{meter_key}");
-        self.usage.insert(key, result);
+        if result.allowed {
+            self.usage.insert(key, result);
+        } else {
+            self.usage_denied.insert(key, result);
+        }
     }
 
     /// Look up cached per-request token limits
@@ -98,10 +114,11 @@ impl EntitlementCache {
         self.entitlements.invalidate(&key);
     }
 
-    /// Invalidate a specific cached usage check
+    /// Invalidate a specific cached usage check (both positive and negative)
     pub fn invalidate_usage(&self, entity_type: &str, entity_id: &str, meter_key: &str) {
         let key = format!("{entity_type}:{entity_id}:{meter_key}");
         self.usage.invalidate(&key);
+        self.usage_denied.invalidate(&key);
     }
 }
 

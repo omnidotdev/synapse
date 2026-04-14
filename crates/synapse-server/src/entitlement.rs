@@ -191,13 +191,17 @@ async fn check_usage(
         .check_usage(entity_type, entity_id, meter_key, additional_usage)
         .await?;
 
-    // Only cache positive results so usage limit resets take effect
-    // immediately rather than returning phantom 429s for up to cache TTL
-    if response.allowed {
-        state
-            .cache
-            .put_usage(entity_type, entity_id, meter_key, CachedUsageCheck { allowed: true });
-    }
+    // Cache both positive and negative results. Positive results use the
+    // full TTL; negative results use a short TTL (5s) to prevent thundering
+    // herd on rate-limited users while allowing limit resets to propagate.
+    state.cache.put_usage(
+        entity_type,
+        entity_id,
+        meter_key,
+        CachedUsageCheck {
+            allowed: response.allowed,
+        },
+    );
 
     Ok(response.allowed)
 }
