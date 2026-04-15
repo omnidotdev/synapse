@@ -203,6 +203,7 @@ impl BillingConfig {
             &self.meters.requests,
             &self.meters.input_tokens,
             &self.meters.output_tokens,
+            &self.meters.messages,
         ]
     }
 
@@ -529,10 +530,11 @@ mod tests {
         let config: BillingConfig = toml::from_str(toml).unwrap();
         let keys = config.all_meter_keys();
 
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 4);
         assert!(keys.contains(&"custom_input"));
         assert!(keys.contains(&"custom_output"));
         assert!(keys.contains(&"custom_requests"));
+        assert!(keys.contains(&"custom_messages"));
     }
 
     #[test]
@@ -547,10 +549,11 @@ mod tests {
         let config: BillingConfig = toml::from_str(toml).unwrap();
         let keys = config.all_meter_keys();
 
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 4);
         assert!(keys.contains(&"input_tokens"));
         assert!(keys.contains(&"output_tokens"));
         assert!(keys.contains(&"requests"));
+        assert!(keys.contains(&"messages"));
     }
 
     #[test]
