@@ -1,0 +1,4 @@
+[target.x86_64-unknown-linux-gnu]
+# Override rust-lld (Rust 1.90 default) with GNU ld to avoid
+# "unknown relocation" errors from aws-lc-sys debug info
+linker = "cc"

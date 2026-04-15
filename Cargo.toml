@@ -1,0 +1,132 @@
+[workspace]
+members = ["crates/*", "synapse"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+authors = ["Omni <team@omni.dev>"]
+description = "Unified AI router for LLM, embeddings, image generation, MCP, STT, and TTS"
+license = "Apache-2.0"
+homepage = "https://synapse.omni.dev"
+repository = "https://github.com/omnidotdev/synapse"
+keywords = ["synapse", "llm", "ai", "mcp", "stt", "tts"]
+categories = ["web-programming", "api-bindings", "command-line-utilities"]
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+aws-config = { version = "1.8", features = ["behavior-version-latest"] }
+aws-credential-types = "1.2"
+aws-sdk-bedrock = { version = "1.140", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1.129", features = ["behavior-version-latest"] }
+aws-smithy-runtime-api = "1.11"
+aws-smithy-types = "1.4"
+axum = { version = "0.8.8", features = ["macros"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+base64 = "0.22.1"
+clap = "4.6.0"
+clickhouse = { version = "0.15", features = ["lz4"] }
+convert_case = "0.11.0"
+ctor = "0.9.1"
+dashmap = "6.1.0"
+deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
+duration-str = "0.21"
+eventsource-stream = "0.2.3"
+fast-glob = "1.0.1"
+futures = "0.3.32"
+futures-util = "0.3.32"
+governor = { version = "0.10", features = ["std", "jitter"] }
+http = "1.4.0"
+http-body = "1.0.1"
+http-body-util = "0.1"
+indexmap = "2.14.0"
+indoc = "2.0.7"
+insta = "1.47.2"
+itertools = "0.14.0"
+jiff = "0.2.23"
+jwt-compact = "0.8.0"
+md5 = "0.8"
+mini-moka = "0.10"
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", features = [
+    "logs",
+    "metrics",
+    "trace",
+    "grpc-tonic",
+    "http-proto",
+    "tls",
+    "tls-roots",
+] }
+opentelemetry-semantic-conventions = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics", "trace", "rt-tokio"] }
+rand = "0.10"
+redis = { version = "1.2", features = ["tokio-rustls-comp", "connection-manager"] }
+regex = "1.12.3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "charset",
+    "http2",
+    "hickory-dns",
+    "query",
+] }
+rmcp = "1.4.0"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+schemars = "1.2"
+secrecy = "0.10.3"
+serde = "1.0.228"
+serde_json = "1.0"
+serde_with = "3"
+sha2 = "0.11"
+strum = { version = "0.28", features = ["derive"] }
+synapse-auth = { path = "crates/synapse-auth" }
+synapse-billing = { path = "crates/synapse-billing" }
+synapse-cache = { path = "crates/synapse-cache" }
+synapse-guardrails = { path = "crates/synapse-guardrails" }
+synapse-client = { path = "crates/synapse-client" }
+synapse-config = { path = "crates/synapse-config" }
+synapse-core = { path = "crates/synapse-core" }
+synapse-embeddings = { version = "0.1.0", path = "crates/synapse-embeddings" }
+synapse-imagegen = { version = "0.1.0", path = "crates/synapse-imagegen" }
+synapse-llm = { path = "crates/synapse-llm", default-features = false }
+synapse-mcp = { path = "crates/synapse-mcp" }
+synapse-ratelimit = { path = "crates/synapse-ratelimit" }
+synapse-routing = { path = "crates/synapse-routing" }
+synapse-server = { path = "crates/synapse-server" }
+synapse-telemetry = { path = "crates/synapse-telemetry" }
+stt = { version = "0.1.0", path = "crates/stt" }
+tts = { version = "0.1.0", path = "crates/tts" }
+tantivy = "0.26.0"
+temp-env = "0.3"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tiktoken-rs = "0.11"
+tokio = { version = "1.51.1", default-features = false }
+tokio-util = "0.7"
+toml = "1.1"
+tonic = "0.14"
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower = "0.5.3"
+tower-http = "0.6.8"
+agent-core = "0.1.0"
+url = "2.5.8"
+uuid = "1.23.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
