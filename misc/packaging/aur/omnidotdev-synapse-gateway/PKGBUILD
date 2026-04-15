@@ -1,0 +1,23 @@
+# Maintainer: Omni <team@omni.dev>
+pkgname=omnidotdev-synapse-gateway
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="AI model router and gateway"
+arch=('x86_64')
+url="https://synapse.omni.dev"
+license=('Apache-2.0')
+depends=()
+makedepends=('cargo')
+source=("https://github.com/omnidotdev/synapse-gateway/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "synapse-gateway-$pkgver"
+  cargo build --release -p synapse
+}
+
+package() {
+  cd "synapse-gateway-$pkgver"
+  install -Dm755 "target/release/synapse" "$pkgdir/usr/bin/synapse"
+  install -Dm644 "LICENSE.md" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
