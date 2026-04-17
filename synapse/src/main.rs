@@ -10,6 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if present (before config parsing so env vars are available)
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
 
     // Load configuration
