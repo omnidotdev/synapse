@@ -4,3 +4,9 @@ listen_address = "0.0.0.0:6000"
 [llm.providers.anthropic]
 type = "anthropic"
 api_key = "{{ env.ANTHROPIC_API_KEY }}"
+
+[mcp.servers.runa.type]
+transport = "stdio"
+command = "bun"
+args = ["run", "server.ts"]
+env = { GRAPHQL_ENDPOINT = "{{ env.RUNA_GRAPHQL_ENDPOINT }}" }
