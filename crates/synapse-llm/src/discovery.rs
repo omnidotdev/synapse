@@ -64,7 +64,7 @@ async fn refresh_all(client: &Client, config: &LlmConfig, known_models: &Arc<RwL
 async fn fetch_models(client: &Client, _name: &str, config: &LlmProviderConfig) -> Result<Vec<String>, String> {
     match &config.provider_type {
         LlmProviderType::Openai => fetch_openai_models(client, config).await,
-        LlmProviderType::Anthropic => Ok(static_anthropic_models()),
+        LlmProviderType::Anthropic => fetch_anthropic_models(client, config).await,
         LlmProviderType::Google => fetch_google_models(client, config).await,
         LlmProviderType::Bedrock(bedrock_config) => fetch_bedrock_models(bedrock_config).await,
     }
@@ -96,18 +96,81 @@ async fn fetch_openai_models(client: &Client, config: &LlmProviderConfig) -> Res
     Ok(body.data.into_iter().map(|m| m.id).collect())
 }
 
-/// Static list of known Anthropic models
-///
-/// Anthropic provides a models list endpoint, but it requires auth
-/// and may not return all available models, so we maintain a static
-/// fallback list of commonly available models
+/// Fetch models from Anthropic's `/v1/models` endpoint, falling back to a
+/// static list when the call fails (no key configured, transient network
+/// error, or the configured key lacks `models:read`). The live endpoint
+/// keeps bare model-name resolution working as Anthropic releases new
+/// models; the static list keeps Synapse routable in offline / unauthed
+/// environments.
+async fn fetch_anthropic_models(client: &Client, config: &LlmProviderConfig) -> Result<Vec<String>, String> {
+    let base_url = config.base_url.as_ref().map_or_else(
+        || "https://api.anthropic.com".to_owned(),
+        |u| u.as_str().trim_end_matches('/').to_owned(),
+    );
+    let url = format!("{base_url}/v1/models");
+
+    let mut builder = client
+        .get(&url)
+        .header("anthropic-version", "2023-06-01");
+    if let Some(api_key) = &config.api_key {
+        builder = builder.header("x-api-key", api_key.expose_secret());
+    }
+
+    let response = match builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "anthropic /v1/models request failed; using static fallback");
+            return Ok(static_anthropic_models());
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "anthropic /v1/models returned error; using static fallback",
+        );
+        return Ok(static_anthropic_models());
+    }
+
+    let body: AnthropicModelList = match response.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to parse anthropic /v1/models response; using static fallback");
+            return Ok(static_anthropic_models());
+        }
+    };
+
+    Ok(body.data.into_iter().map(|m| m.id).collect())
+}
+
+/// Wire-format types for Anthropic's models list endpoint
+/// (https://docs.anthropic.com/en/api/models-list).
+#[derive(serde::Deserialize)]
+struct AnthropicModelList {
+    data: Vec<AnthropicModelInfo>,
+}
+
+#[derive(serde::Deserialize)]
+struct AnthropicModelInfo {
+    id: String,
+}
+
+/// Static fallback list used when Anthropic's `/v1/models` endpoint is
+/// unreachable (no API key configured, network failure). Kept reasonably
+/// current so bare-name resolution still works for the most common models;
+/// the live endpoint is the source of truth otherwise.
 fn static_anthropic_models() -> Vec<String> {
     vec![
+        // Claude 4.5 generation
+        "claude-sonnet-4-5-20250929".to_owned(),
+        "claude-haiku-4-5-20251001".to_owned(),
+        // Claude 4 generation
         "claude-opus-4-20250514".to_owned(),
         "claude-sonnet-4-20250514".to_owned(),
-        "claude-haiku-4-5-20251001".to_owned(),
+        // Claude 3.5
         "claude-3-5-sonnet-20241022".to_owned(),
         "claude-3-5-haiku-20241022".to_owned(),
+        // Claude 3
         "claude-3-opus-20240229".to_owned(),
         "claude-3-sonnet-20240229".to_owned(),
         "claude-3-haiku-20240307".to_owned(),
