@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::CacheControl;
+
 // -- Request types --
 
 /// Anthropic messages API request
@@ -11,9 +13,10 @@ pub struct AnthropicRequest {
     pub model: String,
     /// Maximum tokens to generate (required by Anthropic)
     pub max_tokens: u32,
-    /// System prompt (top-level, not in messages)
+    /// System prompt (top-level, not in messages). Accepts a plain string or an array of
+    /// content blocks (used by clients that attach `cache_control` to individual blocks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<AnthropicSystemPrompt>,
     /// Conversation messages
     pub messages: Vec<AnthropicMessage>,
     /// Sampling temperature
@@ -58,6 +61,16 @@ pub enum AnthropicContent {
     Blocks(Vec<AnthropicContentBlock>),
 }
 
+/// System prompt shape — string shorthand or array of content blocks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicSystemPrompt {
+    /// Plain text (shorthand)
+    Text(String),
+    /// Array of content blocks (typically text with optional cache_control)
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
 /// Content block in an Anthropic message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -66,6 +79,10 @@ pub enum AnthropicContentBlock {
     Text {
         /// The text string
         text: String,
+        /// Optional prompt-caching annotation (preserved across the proxy boundary
+        /// so upstream Anthropic can apply caching to the marked prefix).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Image content
     Image {
@@ -313,4 +330,93 @@ pub struct AnthropicErrorDetail {
     pub error_type: String,
     /// Error message
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_accepts_plain_string() {
+        let json = r#"{
+            "model": "claude-sonnet-4",
+            "max_tokens": 1024,
+            "system": "You are a helpful assistant.",
+            "messages": []
+        }"#;
+        let req: AnthropicRequest = serde_json::from_str(json).expect("deserialize");
+        match req.system {
+            Some(AnthropicSystemPrompt::Text(text)) => assert_eq!(text, "You are a helpful assistant."),
+            other => panic!("expected Text variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_accepts_content_block_array() {
+        let json = r#"{
+            "model": "claude-sonnet-4",
+            "max_tokens": 1024,
+            "system": [
+                { "type": "text", "text": "First block." },
+                { "type": "text", "text": "Second block." }
+            ],
+            "messages": []
+        }"#;
+        let req: AnthropicRequest = serde_json::from_str(json).expect("deserialize");
+        match req.system {
+            Some(AnthropicSystemPrompt::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    AnthropicContentBlock::Text { text, .. } => assert_eq!(text, "First block."),
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_block_preserves_cache_control_on_deserialize() {
+        // pi-ai attaches `cache_control` to system blocks to trigger upstream prompt
+        // caching. The field must deserialize into the typed `CacheControl` value so it
+        // survives the wire-format → internal → wire-format round trip back to Anthropic.
+        let json = r#"{
+            "model": "claude-sonnet-4",
+            "max_tokens": 1024,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "Cached system prompt.",
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ],
+            "messages": []
+        }"#;
+        let req: AnthropicRequest = serde_json::from_str(json).expect("deserialize");
+        match req.system {
+            Some(AnthropicSystemPrompt::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AnthropicContentBlock::Text { text, cache_control } => {
+                        assert_eq!(text, "Cached system prompt.");
+                        let cc = cache_control.as_ref().expect("cache_control preserved");
+                        assert_eq!(cc.cache_type, "ephemeral");
+                    }
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_omitted_remains_none() {
+        let json = r#"{
+            "model": "claude-sonnet-4",
+            "max_tokens": 1024,
+            "messages": []
+        }"#;
+        let req: AnthropicRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.system.is_none());
+    }
 }

@@ -5,6 +5,12 @@ listen_address = "0.0.0.0:6000"
 type = "anthropic"
 api_key = "{{ env.ANTHROPIC_API_KEY }}"
 
+# Forward inbound `anthropic-beta` to upstream so clients can opt into beta features
+# (e.g. interleaved-thinking, fine-grained-tool-streaming) without per-deployment config.
+[[llm.providers.anthropic.headers]]
+type = "forward"
+name = "anthropic-beta"
+
 [mcp.servers.runa.type]
 transport = "streamable_http"
 url = "http://localhost:4001/mcp"

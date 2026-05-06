@@ -75,7 +75,7 @@ impl From<OpenAiMessage> for Message {
 impl From<OpenAiContentPart> for ContentPart {
     fn from(part: OpenAiContentPart) -> Self {
         match part {
-            OpenAiContentPart::Text { text } => Self::Text { text },
+            OpenAiContentPart::Text { text } => Self::Text { text, cache_control: None },
             OpenAiContentPart::ImageUrl { image_url } => Self::Image {
                 url: image_url.url,
                 detail: image_url.detail,
@@ -250,7 +250,7 @@ impl From<&Message> for OpenAiMessage {
 impl From<&ContentPart> for OpenAiContentPart {
     fn from(part: &ContentPart) -> Self {
         match part {
-            ContentPart::Text { text } => Self::Text { text: text.clone() },
+            ContentPart::Text { text, .. } => Self::Text { text: text.clone() },
             ContentPart::Image { url, detail } => Self::ImageUrl {
                 image_url: OpenAiImageUrl {
                     url: url.clone(),

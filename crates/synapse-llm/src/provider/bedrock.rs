@@ -449,7 +449,7 @@ fn build_content_blocks(msg: &Message) -> Vec<ContentBlock> {
         Content::Parts(parts) => {
             for part in parts {
                 match part {
-                    crate::types::ContentPart::Text { text } => {
+                    crate::types::ContentPart::Text { text, .. } => {
                         blocks.push(ContentBlock::Text(text.clone()));
                     }
                     crate::types::ContentPart::Image { url, .. } => {

@@ -50,7 +50,7 @@ impl Content {
             Self::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     ContentPart::Image { .. } => None,
                 })
                 .collect::<Vec<_>>()
@@ -67,6 +67,10 @@ pub enum ContentPart {
     Text {
         /// The text string
         text: String,
+        /// Provider-specific caching annotation. Currently used by the Anthropic provider
+        /// for prompt caching (`{ "type": "ephemeral" }`); other providers ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Image reference
     Image {
@@ -76,6 +80,18 @@ pub enum ContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+}
+
+/// Caching annotation attached to a content part. Wire-shape mirrors Anthropic's
+/// `cache_control` field; other providers ignore the value when converting outbound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheControl {
+    /// Cache strategy identifier (e.g. `"ephemeral"`).
+    #[serde(rename = "type")]
+    pub cache_type: String,
+    /// Optional TTL hint (e.g. `"5m"`, `"1h"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
 }
 
 /// A tool/function call requested by the assistant

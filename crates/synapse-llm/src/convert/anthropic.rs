@@ -5,13 +5,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::protocol::anthropic::{
     AnthropicContent, AnthropicContentBlock, AnthropicImageSource, AnthropicMessage, AnthropicMessageDelta,
     AnthropicRequest, AnthropicResponse, AnthropicResponseBlock, AnthropicStreamContentBlock, AnthropicStreamDelta,
-    AnthropicStreamEvent, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
+    AnthropicStreamEvent, AnthropicSystemPrompt, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
 };
 use crate::types::{
     Choice, ChoiceMessage, CompletionParams, CompletionRequest, CompletionResponse, Content, ContentPart, FinishReason,
     FunctionCall, FunctionDefinition, Message, Role, StreamDelta, StreamEvent, StreamFunctionCall, StreamToolCall,
     ToolCall, ToolChoice, ToolChoiceFunction, ToolChoiceMode, ToolDefinition, Usage,
 };
+
+/// True when any text part carries a `cache_control` annotation. Used to decide whether
+/// to preserve content as a block array on the wire (cache annotations require it) or
+/// collapse to the plain-string shorthand.
+fn has_cache_control(parts: &[ContentPart]) -> bool {
+    parts.iter().any(|p| matches!(p, ContentPart::Text { cache_control: Some(_), .. }))
+}
 
 /// Default max tokens when not specified (Anthropic requires this field)
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -22,15 +29,46 @@ impl From<AnthropicRequest> for CompletionRequest {
     fn from(req: AnthropicRequest) -> Self {
         let mut messages: Vec<Message> = Vec::new();
 
-        // Convert system prompt to a system message
+        // Convert system prompt to a system message. Accepts both string and content-block
+        // array forms; non-text blocks in a system prompt are dropped (unsupported upstream).
+        // Block form is preserved as `Content::Parts` so per-block `cache_control` annotations
+        // round-trip back out to the upstream provider unchanged.
         if let Some(system) = req.system {
-            messages.push(Message {
-                role: Role::System,
-                content: Content::Text(system),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-            });
+            let system_message = match system {
+                AnthropicSystemPrompt::Text(text) if !text.is_empty() => Some(Message {
+                    role: Role::System,
+                    content: Content::Text(text),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                }),
+                AnthropicSystemPrompt::Blocks(blocks) => {
+                    let parts: Vec<ContentPart> = blocks
+                        .into_iter()
+                        .filter_map(|block| match block {
+                            AnthropicContentBlock::Text { text, cache_control } => {
+                                Some(ContentPart::Text { text, cache_control })
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if parts.is_empty() {
+                        None
+                    } else {
+                        Some(Message {
+                            role: Role::System,
+                            content: Content::Parts(parts),
+                            name: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        })
+                    }
+                }
+                _ => None,
+            };
+            if let Some(msg) = system_message {
+                messages.push(msg);
+            }
         }
 
         // Convert Anthropic messages
@@ -80,8 +118,8 @@ fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
 
             for block in blocks {
                 match block {
-                    AnthropicContentBlock::Text { text } => {
-                        text_parts.push(ContentPart::Text { text });
+                    AnthropicContentBlock::Text { text, cache_control } => {
+                        text_parts.push(ContentPart::Text { text, cache_control });
                     }
                     AnthropicContentBlock::Image { source } => {
                         // Convert to internal image representation
@@ -120,14 +158,16 @@ fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
                 };
             }
 
-            let content = if text_parts.len() == 1 {
+            // Collapse to plain text only when the part has no caching annotation;
+            // any `cache_control` must be preserved on the parts representation.
+            let content = if text_parts.is_empty() {
+                Content::Text(String::new())
+            } else if text_parts.len() == 1 && !has_cache_control(&text_parts) {
                 match text_parts.into_iter().next() {
-                    Some(ContentPart::Text { text }) => Content::Text(text),
+                    Some(ContentPart::Text { text, .. }) => Content::Text(text),
                     Some(other) => Content::Parts(vec![other]),
                     None => Content::Text(String::new()),
                 }
-            } else if text_parts.is_empty() {
-                Content::Text(String::new())
             } else {
                 Content::Parts(text_parts)
             };
@@ -182,7 +222,7 @@ impl From<&CompletionRequest> for AnthropicRequest {
         for msg in &req.messages {
             match msg.role {
                 Role::System => {
-                    system = Some(msg.content.as_text());
+                    system = Some(internal_system_to_anthropic(&msg.content));
                 }
                 _ => {
                     messages.push(internal_message_to_anthropic(msg));
@@ -223,6 +263,27 @@ impl From<&CompletionRequest> for AnthropicRequest {
     }
 }
 
+/// Convert an internal system-message body to the Anthropic `system` field. Plain text
+/// content uses the string shorthand; multi-part content (or any part carrying a
+/// caching annotation) is emitted as a block array so `cache_control` is preserved.
+fn internal_system_to_anthropic(content: &Content) -> AnthropicSystemPrompt {
+    match content {
+        Content::Text(text) => AnthropicSystemPrompt::Text(text.clone()),
+        Content::Parts(parts) => AnthropicSystemPrompt::Blocks(
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text, cache_control } => Some(AnthropicContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: cache_control.clone(),
+                    }),
+                    ContentPart::Image { .. } => None,
+                })
+                .collect(),
+        ),
+    }
+}
+
 /// Convert an internal message to Anthropic wire format
 fn internal_message_to_anthropic(msg: &Message) -> AnthropicMessage {
     let role = match msg.role {
@@ -250,7 +311,10 @@ fn internal_message_to_anthropic(msg: &Message) -> AnthropicMessage {
 
         let text = msg.content.as_text();
         if !text.is_empty() {
-            blocks.push(AnthropicContentBlock::Text { text });
+            blocks.push(AnthropicContentBlock::Text {
+                text,
+                cache_control: None,
+            });
         }
 
         for tc in tool_calls {
@@ -275,7 +339,10 @@ fn internal_message_to_anthropic(msg: &Message) -> AnthropicMessage {
             let blocks = parts
                 .iter()
                 .map(|part| match part {
-                    ContentPart::Text { text } => AnthropicContentBlock::Text { text: text.clone() },
+                    ContentPart::Text { text, cache_control } => AnthropicContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: cache_control.clone(),
+                    },
                     ContentPart::Image { url, .. } => {
                         // Parse data URI or use URL directly
                         if let Some(rest) = url.strip_prefix("data:")
@@ -647,6 +714,174 @@ pub fn internal_to_anthropic_stream_events(
         }
         StreamEvent::Done => {
             vec![AnthropicStreamEvent::MessageStop]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CacheControl;
+
+    fn make_request(system: Option<AnthropicSystemPrompt>) -> AnthropicRequest {
+        AnthropicRequest {
+            model: "claude-sonnet-4".into(),
+            max_tokens: 1024,
+            system,
+            messages: vec![],
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    fn system_message(req: &CompletionRequest) -> Option<&Message> {
+        req.messages.iter().find(|m| matches!(m.role, Role::System))
+    }
+
+    #[test]
+    fn system_string_converts_to_text_content() {
+        let internal: CompletionRequest = make_request(Some(AnthropicSystemPrompt::Text("you are helpful".into()))).into();
+        let sys = system_message(&internal).expect("system message present");
+        match &sys.content {
+            Content::Text(text) => assert_eq!(text, "you are helpful"),
+            other => panic!("expected Text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_blocks_preserve_as_parts_so_cache_control_round_trips() {
+        let cc = CacheControl {
+            cache_type: "ephemeral".into(),
+            ttl: None,
+        };
+        let req = make_request(Some(AnthropicSystemPrompt::Blocks(vec![
+            AnthropicContentBlock::Text {
+                text: "first".into(),
+                cache_control: Some(cc.clone()),
+            },
+            AnthropicContentBlock::Text {
+                text: "second".into(),
+                cache_control: None,
+            },
+        ])));
+        let internal: CompletionRequest = req.into();
+        let sys = system_message(&internal).expect("system message present");
+        match &sys.content {
+            Content::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    ContentPart::Text { text, cache_control } => {
+                        assert_eq!(text, "first");
+                        assert_eq!(cache_control.as_ref(), Some(&cc));
+                    }
+                    other => panic!("expected text part, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::Text { text, cache_control } => {
+                        assert_eq!(text, "second");
+                        assert!(cache_control.is_none());
+                    }
+                    other => panic!("expected text part, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_blocks_round_trip_back_to_anthropic_preserves_cache_control() {
+        // pi-ai sends: system: [{type:text, text:"...", cache_control:{type:ephemeral}}]
+        // Synapse must not strip cache_control on the way out to upstream.
+        let original_cc = CacheControl {
+            cache_type: "ephemeral".into(),
+            ttl: Some("5m".into()),
+        };
+        let inbound = make_request(Some(AnthropicSystemPrompt::Blocks(vec![AnthropicContentBlock::Text {
+            text: "cached prefix".into(),
+            cache_control: Some(original_cc.clone()),
+        }])));
+        let internal: CompletionRequest = inbound.into();
+        let outbound: AnthropicRequest = (&internal).into();
+        match outbound.system {
+            Some(AnthropicSystemPrompt::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AnthropicContentBlock::Text { text, cache_control } => {
+                        assert_eq!(text, "cached prefix");
+                        assert_eq!(cache_control.as_ref(), Some(&original_cc));
+                    }
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks system on outbound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_text_round_trips_back_as_text_shorthand() {
+        let inbound = make_request(Some(AnthropicSystemPrompt::Text("plain".into())));
+        let internal: CompletionRequest = inbound.into();
+        let outbound: AnthropicRequest = (&internal).into();
+        match outbound.system {
+            Some(AnthropicSystemPrompt::Text(text)) => assert_eq!(text, "plain"),
+            other => panic!("expected Text shorthand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_with_only_non_text_blocks_emits_no_system_message() {
+        let req = make_request(Some(AnthropicSystemPrompt::Blocks(vec![AnthropicContentBlock::ToolUse {
+            id: "x".into(),
+            name: "y".into(),
+            input: serde_json::json!({}),
+        }])));
+        let internal: CompletionRequest = req.into();
+        assert!(system_message(&internal).is_none());
+    }
+
+    #[test]
+    fn user_message_text_block_with_cache_control_round_trips() {
+        // Caching of long user-message prefixes is also valid in the Anthropic API.
+        let cc = CacheControl {
+            cache_type: "ephemeral".into(),
+            ttl: None,
+        };
+        let inbound = AnthropicRequest {
+            model: "claude-sonnet-4".into(),
+            max_tokens: 1024,
+            system: None,
+            messages: vec![AnthropicMessage {
+                role: "user".into(),
+                content: AnthropicContent::Blocks(vec![AnthropicContentBlock::Text {
+                    text: "long prefix".into(),
+                    cache_control: Some(cc.clone()),
+                }]),
+            }],
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let internal: CompletionRequest = inbound.into();
+        let outbound: AnthropicRequest = (&internal).into();
+        let user_msg = outbound.messages.first().expect("one user message");
+        match &user_msg.content {
+            AnthropicContent::Blocks(blocks) => match &blocks[0] {
+                AnthropicContentBlock::Text { text, cache_control } => {
+                    assert_eq!(text, "long prefix");
+                    assert_eq!(cache_control.as_ref(), Some(&cc));
+                }
+                other => panic!("expected text block, got {other:?}"),
+            },
+            other => panic!("expected Blocks content, got {other:?}"),
         }
     }
 }

@@ -111,7 +111,7 @@ fn internal_message_to_google(msg: &Message, role: &str) -> GoogleContent {
         Content::Parts(content_parts) => {
             for part in content_parts {
                 match part {
-                    ContentPart::Text { text } => {
+                    ContentPart::Text { text, .. } => {
                         parts.push(GooglePart::Text(text.clone()));
                     }
                     ContentPart::Image { url, .. } => {
