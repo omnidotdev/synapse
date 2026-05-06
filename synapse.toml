@@ -1,5 +1,8 @@
 [server]
-listen_address = "0.0.0.0:6000"
+# Avoid port 6000 (X11) — undici/Node fetch blocks it via the WHATWG bad-port
+# blocklist, which breaks any client built on the Anthropic SDK or other
+# fetch-based HTTP libraries that respect the blocklist.
+listen_address = "0.0.0.0:6100"
 
 [llm.providers.anthropic]
 type = "anthropic"

@@ -18,7 +18,7 @@ local_resource(
     readiness_probe=probe(
         http_get=http_get_action(
             path="/health",
-            port=6000,
+            port=6100,
         ),
         initial_delay_secs=5,
         period_secs=5,

@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::protocol::anthropic::{
     AnthropicContent, AnthropicContentBlock, AnthropicImageSource, AnthropicMessage, AnthropicMessageDelta,
     AnthropicRequest, AnthropicResponse, AnthropicResponseBlock, AnthropicStreamContentBlock, AnthropicStreamDelta,
-    AnthropicStreamEvent, AnthropicSystemPrompt, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
+    AnthropicStreamEvent, AnthropicStreamMessage, AnthropicSystemPrompt, AnthropicTool, AnthropicToolChoice,
+    AnthropicUsage,
 };
 use crate::types::{
     Choice, ChoiceMessage, CompletionParams, CompletionRequest, CompletionResponse, Content, ContentPart, FinishReason,
@@ -71,9 +72,11 @@ impl From<AnthropicRequest> for CompletionRequest {
             }
         }
 
-        // Convert Anthropic messages
+        // Convert Anthropic messages. A single Anthropic message can carry
+        // multiple tool_result blocks (parallel tool calls), which the internal
+        // shape can only express as one Role::Tool message per result.
         for msg in req.messages {
-            messages.push(anthropic_message_to_internal(msg));
+            messages.extend(anthropic_message_to_internal(msg));
         }
 
         Self {
@@ -95,26 +98,28 @@ impl From<AnthropicRequest> for CompletionRequest {
     }
 }
 
-/// Convert a single Anthropic message to internal representation
-fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
+/// Convert a single Anthropic message to internal representation. Returns a
+/// vector because a single Anthropic message with parallel tool_result blocks
+/// must fan out to one `Role::Tool` message per result — the internal shape
+/// only carries one `tool_call_id` per message.
+fn anthropic_message_to_internal(msg: AnthropicMessage) -> Vec<Message> {
     let role = match msg.role.as_str() {
         "assistant" => Role::Assistant,
         _ => Role::User,
     };
 
     match msg.content {
-        AnthropicContent::Text(text) => Message {
+        AnthropicContent::Text(text) => vec![Message {
             role,
             content: Content::Text(text),
             name: None,
             tool_calls: None,
             tool_call_id: None,
-        },
+        }],
         AnthropicContent::Blocks(blocks) => {
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
-            let mut tool_call_id = None;
-            let mut tool_result_content = None;
+            let mut tool_results: Vec<(String, Option<String>)> = Vec::new();
 
             for block in blocks {
                 match block {
@@ -141,21 +146,26 @@ fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
                     AnthropicContentBlock::ToolResult {
                         tool_use_id, content, ..
                     } => {
-                        tool_call_id = Some(tool_use_id);
-                        tool_result_content = content;
+                        tool_results.push((tool_use_id, content));
                     }
                 }
             }
 
-            // If this is a tool result message, return it as such
-            if let Some(tc_id) = tool_call_id {
-                return Message {
-                    role: Role::Tool,
-                    content: Content::Text(tool_result_content.unwrap_or_default()),
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: Some(tc_id),
-                };
+            // Tool results: emit one Tool message per result so all of them
+            // survive a round trip (Anthropic requires every tool_use id to
+            // have a matching tool_result, and the outbound coalesces these
+            // back into one Anthropic user message).
+            if !tool_results.is_empty() {
+                return tool_results
+                    .into_iter()
+                    .map(|(tc_id, content)| Message {
+                        role: Role::Tool,
+                        content: Content::Text(content.unwrap_or_default()),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: Some(tc_id),
+                    })
+                    .collect();
             }
 
             // Collapse to plain text only when the part has no caching annotation;
@@ -172,13 +182,13 @@ fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
                 Content::Parts(text_parts)
             };
 
-            Message {
+            vec![Message {
                 role,
                 content,
                 name: None,
                 tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                 tool_call_id: None,
-            }
+            }]
         }
     }
 }
@@ -219,10 +229,33 @@ impl From<&CompletionRequest> for AnthropicRequest {
         let mut system = None;
         let mut messages = Vec::new();
 
-        for msg in &req.messages {
+        // Walk messages with peek so consecutive `Role::Tool` entries can be
+        // coalesced into one Anthropic user message — the API requires every
+        // `tool_use` from the prior assistant turn to be answered in a single
+        // following user message containing all matching `tool_result` blocks.
+        let mut iter = req.messages.iter().peekable();
+        while let Some(msg) = iter.next() {
             match msg.role {
                 Role::System => {
                     system = Some(internal_system_to_anthropic(&msg.content));
+                }
+                Role::Tool => {
+                    let mut blocks = Vec::new();
+                    push_tool_result_block(msg, &mut blocks);
+                    while let Some(next) = iter.peek() {
+                        if next.role == Role::Tool {
+                            push_tool_result_block(next, &mut blocks);
+                            iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if !blocks.is_empty() {
+                        messages.push(AnthropicMessage {
+                            role: "user".to_owned(),
+                            content: AnthropicContent::Blocks(blocks),
+                        });
+                    }
                 }
                 _ => {
                     messages.push(internal_message_to_anthropic(msg));
@@ -263,6 +296,19 @@ impl From<&CompletionRequest> for AnthropicRequest {
     }
 }
 
+/// Push one Anthropic `tool_result` block for an internal `Role::Tool`
+/// message. No-ops if the message is missing its `tool_call_id` (which would
+/// indicate an upstream bug rather than a legitimate empty case).
+fn push_tool_result_block(msg: &Message, blocks: &mut Vec<AnthropicContentBlock>) {
+    if let Some(tc_id) = &msg.tool_call_id {
+        blocks.push(AnthropicContentBlock::ToolResult {
+            tool_use_id: tc_id.clone(),
+            content: Some(msg.content.as_text()),
+            is_error: None,
+        });
+    }
+}
+
 /// Convert an internal system-message body to the Anthropic `system` field. Plain text
 /// content uses the string shorthand; multi-part content (or any part carrying a
 /// caching annotation) is emitted as a block array so `cache_control` is preserved.
@@ -291,7 +337,9 @@ fn internal_message_to_anthropic(msg: &Message) -> AnthropicMessage {
         Role::Tool | Role::User | Role::System => "user",
     };
 
-    // Handle tool result messages
+    // Tool messages are handled (and coalesced) at the request-level loop in
+    // `From<&CompletionRequest> for AnthropicRequest`, so this fallback is
+    // only reached if a single Tool message is converted in isolation.
     if msg.role == Role::Tool
         && let Some(tool_call_id) = &msg.tool_call_id
     {
@@ -653,67 +701,143 @@ impl AnthropicStreamState {
     }
 }
 
-/// Build Anthropic stream events from internal stream events (for Anthropic-compatible output)
-pub fn internal_to_anthropic_stream_events(
-    event: &StreamEvent,
-    _model: &str,
-    _response_id: &str,
-) -> Vec<AnthropicStreamEvent> {
-    match event {
-        StreamEvent::Delta(delta) => {
-            let mut events = Vec::new();
+/// Stateful converter from internal `StreamEvent`s to the Anthropic SSE event
+/// envelope. The Anthropic streaming spec requires `message_start` before any
+/// other event and `content_block_start` before each block's first delta;
+/// emitting the message_delta/message_stop without those preludes makes
+/// spec-compliant clients (the Anthropic SDK, pi-ai, anything built on
+/// `@anthropic-ai/sdk`) crash on `usage.input_tokens` access.
+#[derive(Debug)]
+pub struct AnthropicStreamConverter {
+    response_id: String,
+    model: String,
+    sent_message_start: bool,
+    started_blocks: std::collections::BTreeSet<u32>,
+}
 
-            if let Some(content) = &delta.content {
-                events.push(AnthropicStreamEvent::ContentBlockDelta {
-                    index: 0,
-                    delta: AnthropicStreamDelta::TextDelta { text: content.clone() },
-                });
+impl AnthropicStreamConverter {
+    /// Create a new converter. `response_id` should be the synthetic
+    /// `msg_<uuid>` string the handler exposes; `model` is the resolved model
+    /// id surfaced back to the client.
+    pub fn new(response_id: String, model: String) -> Self {
+        Self {
+            response_id,
+            model,
+            sent_message_start: false,
+            started_blocks: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Convert one internal stream event into zero or more Anthropic events.
+    /// Prepends `message_start` on the first call and synthesises
+    /// `content_block_start` / `content_block_stop` around content / tool-use
+    /// deltas so the wire stream is spec-compliant.
+    pub fn convert(&mut self, event: &StreamEvent) -> Vec<AnthropicStreamEvent> {
+        let mut events = Vec::new();
+
+        if !self.sent_message_start {
+            self.sent_message_start = true;
+            events.push(AnthropicStreamEvent::MessageStart {
+                message: AnthropicStreamMessage {
+                    id: self.response_id.clone(),
+                    message_type: "message".to_owned(),
+                    role: "assistant".to_owned(),
+                    model: self.model.clone(),
+                    usage: Some(AnthropicUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    }),
+                },
+            });
+        }
+
+        match event {
+            StreamEvent::Delta(delta) => {
+                if let Some(content) = &delta.content {
+                    if self.started_blocks.insert(0) {
+                        events.push(AnthropicStreamEvent::ContentBlockStart {
+                            index: 0,
+                            content_block: AnthropicStreamContentBlock::Text { text: String::new() },
+                        });
+                    }
+                    events.push(AnthropicStreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: AnthropicStreamDelta::TextDelta { text: content.clone() },
+                    });
+                }
+
+                if let Some(tc) = &delta.tool_call
+                    && let Some(func) = &tc.function
+                {
+                    if self.started_blocks.insert(tc.index) {
+                        events.push(AnthropicStreamEvent::ContentBlockStart {
+                            index: tc.index,
+                            content_block: AnthropicStreamContentBlock::ToolUse {
+                                id: tc.id.clone().unwrap_or_default(),
+                                name: func.name.clone().unwrap_or_default(),
+                                input: serde_json::json!({}),
+                            },
+                        });
+                    }
+                    if let Some(args) = &func.arguments {
+                        events.push(AnthropicStreamEvent::ContentBlockDelta {
+                            index: tc.index,
+                            delta: AnthropicStreamDelta::InputJsonDelta {
+                                partial_json: args.clone(),
+                            },
+                        });
+                    }
+                }
+
+                if let Some(finish_reason) = &delta.finish_reason {
+                    self.close_open_blocks(&mut events);
+
+                    let stop_reason = match finish_reason {
+                        FinishReason::Stop | FinishReason::ContentFilter => "end_turn",
+                        FinishReason::Length => "max_tokens",
+                        FinishReason::ToolCalls => "tool_use",
+                    };
+                    // Anthropic-SDK / pi-ai dereference `event.usage.input_tokens`
+                    // on every `message_delta`; emitting `usage: null` crashes
+                    // those clients. The actual token counts arrive in a
+                    // separate `Usage` event later, which fires another
+                    // `message_delta` that overwrites these zero placeholders.
+                    events.push(AnthropicStreamEvent::MessageDelta {
+                        delta: AnthropicMessageDelta {
+                            stop_reason: Some(stop_reason.to_owned()),
+                            stop_sequence: None,
+                        },
+                        usage: Some(AnthropicUsage {
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        }),
+                    });
+                }
             }
-
-            if let Some(tc) = &delta.tool_call
-                && let Some(func) = &tc.function
-                && let Some(args) = &func.arguments
-            {
-                events.push(AnthropicStreamEvent::ContentBlockDelta {
-                    index: tc.index,
-                    delta: AnthropicStreamDelta::InputJsonDelta {
-                        partial_json: args.clone(),
-                    },
-                });
-            }
-
-            if let Some(finish_reason) = &delta.finish_reason {
-                let stop_reason = match finish_reason {
-                    FinishReason::Stop | FinishReason::ContentFilter => "end_turn",
-                    FinishReason::Length => "max_tokens",
-                    FinishReason::ToolCalls => "tool_use",
-                };
-
+            StreamEvent::Usage(usage) => {
                 events.push(AnthropicStreamEvent::MessageDelta {
                     delta: AnthropicMessageDelta {
-                        stop_reason: Some(stop_reason.to_owned()),
+                        stop_reason: None,
                         stop_sequence: None,
                     },
-                    usage: None,
+                    usage: Some(AnthropicUsage {
+                        input_tokens: usage.prompt_tokens,
+                        output_tokens: usage.completion_tokens,
+                    }),
                 });
             }
+            StreamEvent::Done => {
+                self.close_open_blocks(&mut events);
+                events.push(AnthropicStreamEvent::MessageStop);
+            }
+        }
 
-            events
-        }
-        StreamEvent::Usage(usage) => {
-            vec![AnthropicStreamEvent::MessageDelta {
-                delta: AnthropicMessageDelta {
-                    stop_reason: None,
-                    stop_sequence: None,
-                },
-                usage: Some(AnthropicUsage {
-                    input_tokens: usage.prompt_tokens,
-                    output_tokens: usage.completion_tokens,
-                }),
-            }]
-        }
-        StreamEvent::Done => {
-            vec![AnthropicStreamEvent::MessageStop]
+        events
+    }
+
+    fn close_open_blocks(&mut self, events: &mut Vec<AnthropicStreamEvent>) {
+        for index in std::mem::take(&mut self.started_blocks) {
+            events.push(AnthropicStreamEvent::ContentBlockStop { index });
         }
     }
 }

@@ -182,10 +182,11 @@ fn anthropic_stream_response(
 ) -> Sse<impl Stream<Item = Result<Event, axum::Error>>> {
     let response_id = format!("msg_{}", uuid_simple());
 
+    let mut converter = convert::anthropic::AnthropicStreamConverter::new(response_id, model);
+
     let event_stream = stream.flat_map(move |result| match result {
         Ok(event) => {
-            let anthropic_events =
-                convert::anthropic::internal_to_anthropic_stream_events(&event, &model, &response_id);
+            let anthropic_events = converter.convert(&event);
 
             let sse_events: Vec<Result<Event, axum::Error>> = if anthropic_events.is_empty() {
                 vec![Ok(Event::default().comment(""))]
