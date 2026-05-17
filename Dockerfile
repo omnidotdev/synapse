@@ -1,4 +1,4 @@
-FROM rust:1.90-slim AS chef
+FROM rust:1.95-slim@sha256:5021128d455987e7e7d6586bd7288fa876614821292614acbb761c21fc1ebb15 AS chef
 
 RUN apt-get update && apt-get install -y \
     curl \
