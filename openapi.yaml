@@ -1,0 +1,835 @@
+openapi: 3.1.0
+
+info:
+  title: Synapse Gateway
+  description: AI router for unified LLM, MCP, STT, TTS, embeddings, and image generation
+  version: 0.1.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Omni
+    url: https://synapse.omni.dev
+
+servers:
+  - url: https://synapse.omni.dev
+    description: Production
+  - url: http://localhost:6000
+    description: Local development
+
+security:
+  - apiKey: []
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: Synapse API key (prefixed with `synapse_`)
+
+  schemas:
+    # -- LLM --
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+        name:
+          type: string
+        tool_calls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolCall"
+        tool_call_id:
+          type: string
+
+    ToolCall:
+      type: object
+      required: [id, type, function]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [function]
+        function:
+          type: object
+          required: [name, arguments]
+          properties:
+            name:
+              type: string
+            arguments:
+              type: string
+
+    ToolDefinition:
+      type: object
+      required: [type, function]
+      properties:
+        type:
+          type: string
+          enum: [function]
+        function:
+          type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+            parameters:
+              type: object
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        max_tokens:
+          type: integer
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        frequency_penalty:
+          type: number
+        presence_penalty:
+          type: number
+        seed:
+          type: integer
+        stream:
+          type: boolean
+          default: false
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolDefinition"
+        tool_choice:
+          oneOf:
+            - type: string
+              enum: [none, auto, required]
+            - type: object
+        stream_options:
+          type: object
+          properties:
+            include_usage:
+              type: boolean
+
+    ChatCompletionResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: "#/components/schemas/ChatMessage"
+              finish_reason:
+                type: string
+                enum: [stop, length, tool_calls, content_filter]
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Model"
+
+    Model:
+      type: object
+      required: [id, object, created, owned_by]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        created:
+          type: integer
+        owned_by:
+          type: string
+
+    # -- Anthropic --
+    AnthropicMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+
+    AnthropicRequest:
+      type: object
+      required: [model, max_tokens, messages]
+      properties:
+        model:
+          type: string
+        max_tokens:
+          type: integer
+        system:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicMessage"
+        temperature:
+          type: number
+        top_p:
+          type: number
+        top_k:
+          type: integer
+        stop_sequences:
+          type: array
+          items:
+            type: string
+        stream:
+          type: boolean
+          default: false
+        tools:
+          type: array
+          items:
+            type: object
+        tool_choice:
+          type: object
+
+    AnthropicResponse:
+      type: object
+      required: [id, type, role, content, model, stop_reason, usage]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        content:
+          type: array
+          items:
+            type: object
+        model:
+          type: string
+        stop_reason:
+          type: string
+          enum: [end_turn, max_tokens, stop_sequence, tool_use]
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+
+    # -- MCP --
+    ListToolsRequest:
+      type: object
+      properties:
+        server:
+          type: string
+          description: Filter to a specific MCP server
+
+    ListToolsResponse:
+      type: object
+      required: [tools]
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpToolInfo"
+
+    McpToolInfo:
+      type: object
+      required: [name, server, description, input_schema]
+      properties:
+        name:
+          type: string
+        server:
+          type: string
+        description:
+          type: string
+        input_schema:
+          type: object
+
+    CallToolRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Qualified tool name (`server__tool`)
+        arguments:
+          type: object
+          additionalProperties: true
+
+    CallToolResponse:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [text, image]
+              text:
+                type: string
+              data:
+                type: string
+              mime_type:
+                type: string
+        is_error:
+          type: boolean
+
+    ToolSearchResult:
+      type: object
+      required: [qualified_name, server_name, tool_name, description, score]
+      properties:
+        qualified_name:
+          type: string
+        server_name:
+          type: string
+        tool_name:
+          type: string
+        description:
+          type: string
+        score:
+          type: number
+
+    SearchResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolSearchResult"
+
+    # -- Embeddings --
+    EmbeddingRequest:
+      type: object
+      required: [input, model]
+      properties:
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        model:
+          type: string
+        encoding_format:
+          type: string
+          enum: [float, base64]
+          default: float
+        dimensions:
+          type: integer
+        user:
+          type: string
+
+    EmbeddingResponse:
+      type: object
+      required: [object, data, model, usage]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            type: object
+            required: [object, embedding, index]
+            properties:
+              object:
+                type: string
+                const: embedding
+              embedding:
+                type: array
+                items:
+                  type: number
+              index:
+                type: integer
+        model:
+          type: string
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    # -- Image generation --
+    ImageRequest:
+      type: object
+      required: [prompt, model]
+      properties:
+        prompt:
+          type: string
+        model:
+          type: string
+        n:
+          type: integer
+          default: 1
+        size:
+          type: string
+          default: 1024x1024
+        quality:
+          type: string
+          enum: [standard, hd]
+          default: standard
+        response_format:
+          type: string
+          enum: [url, b64_json]
+          default: url
+        user:
+          type: string
+
+    ImageResponse:
+      type: object
+      required: [created, data]
+      properties:
+        created:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+              b64_json:
+                type: string
+              revised_prompt:
+                type: string
+
+    # -- STT --
+    TranscriptionResponse:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+
+    # -- TTS --
+    SpeechRequest:
+      type: object
+      required: [model, input, voice]
+      properties:
+        model:
+          type: string
+        input:
+          type: string
+        voice:
+          type: string
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: mp3
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4.0
+          default: 1.0
+
+    # -- Errors --
+    OpenAiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type]
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+            code:
+              type: string
+
+    AnthropicError:
+      type: object
+      required: [type, error]
+      properties:
+        type:
+          type: string
+          const: error
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+
+  parameters:
+    ProviderApiKey:
+      name: X-Provider-API-Key
+      in: header
+      description: Override the configured provider API key (BYOK)
+      schema:
+        type: string
+
+paths:
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: Create a chat completion (OpenAI-compatible)
+      tags: [LLM]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: "Chat completion response (JSON or SSE stream when stream is true)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: List available models
+      tags: [LLM]
+      responses:
+        "200":
+          description: List of available models
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/messages:
+    post:
+      operationId: createMessage
+      summary: Create a message (Anthropic-compatible)
+      tags: [LLM]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicRequest"
+      responses:
+        "200":
+          description: "Message response (JSON or SSE stream when stream is true)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicError"
+
+  /v1/embeddings:
+    post:
+      operationId: createEmbedding
+      summary: Create embeddings
+      tags: [Embeddings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbeddingRequest"
+      responses:
+        "200":
+          description: Embedding vectors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbeddingResponse"
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/images/generations:
+    post:
+      operationId: createImage
+      summary: Generate images from a prompt
+      tags: [Image Generation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageRequest"
+      responses:
+        "200":
+          description: Generated image(s)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageResponse"
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/audio/transcriptions:
+    post:
+      operationId: createTranscription
+      summary: Transcribe audio to text
+      tags: [Speech-to-Text]
+      parameters:
+        - $ref: "#/components/parameters/ProviderApiKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, model]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file (max 32 MiB)
+                model:
+                  type: string
+                language:
+                  type: string
+                  description: ISO 639-1 language code
+                prompt:
+                  type: string
+                response_format:
+                  type: string
+                  enum: [json, text, srt, verbose_json, vtt]
+                  default: json
+                temperature:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+      responses:
+        "200":
+          description: Transcription result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranscriptionResponse"
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/audio/speech:
+    post:
+      operationId: createSpeech
+      summary: Generate speech from text
+      tags: [Text-to-Speech]
+      parameters:
+        - $ref: "#/components/parameters/ProviderApiKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpeechRequest"
+      responses:
+        "200":
+          description: Audio bytes
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /mcp/tools/list:
+    post:
+      operationId: listMcpTools
+      summary: List available MCP tools
+      tags: [MCP]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListToolsRequest"
+      responses:
+        "200":
+          description: Available tools
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListToolsResponse"
+        "401":
+          description: Invalid API key
+
+  /mcp/tools/call:
+    post:
+      operationId: callMcpTool
+      summary: Invoke an MCP tool
+      tags: [MCP]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallToolRequest"
+      responses:
+        "200":
+          description: Tool execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallToolResponse"
+        "401":
+          description: Invalid API key
+
+  /mcp/search:
+    get:
+      operationId: searchMcpTools
+      summary: Search MCP tools by query
+      tags: [MCP]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+          description: Max results
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "401":
+          description: Invalid API key
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      tags: [System]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
