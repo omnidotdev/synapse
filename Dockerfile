@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM rust:1.94-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a AS builder
 
 RUN apt-get update && apt-get install -y \
@@ -19,9 +20,17 @@ COPY ./synapse ./synapse
 # target state for the workspace crates (cooked stubs whose fingerprints
 # survived but rlibs did not), which failed every build with "extern location
 # does not exist" after the workspace version was bumped to 0.1.0. A direct
-# build is reliable and matches local builds. Dependency caching can be
-# reintroduced later via an sccache cache mount once that is understood
-RUN cargo build --release --bin synapse
+# build is reliable and matches local builds.
+#
+# Dependency caching is restored via BuildKit cache mounts on the cargo registry,
+# git db, and target dir (cargo's own incremental caching, persisted on the
+# buildkit worker across builds). The binary is copied out of the target cache
+# mount since cache mounts are not part of the image layer
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/synapse/target \
+    cargo build --release --bin synapse \
+    && cp target/release/synapse /synapse/synapse-bin
 
 #
 # === Final image ===
@@ -49,7 +58,7 @@ RUN adduser -D -u 1000 synapse \
     && chown -R synapse:synapse /data /home/synapse
 USER synapse
 
-COPY --from=builder /synapse/target/release/synapse /bin/synapse
+COPY --from=builder /synapse/synapse-bin /bin/synapse
 COPY config/synapse.prod.toml /etc/synapse.toml
 
 WORKDIR /data
