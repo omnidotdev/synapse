@@ -14,21 +14,12 @@ ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache
 WORKDIR /synapse
 
 FROM chef AS planner
-# One-time cache-bust: the registry buildcache held a stale cargo-chef recipe
-# from before the workspace version bump (0.0.1 to 0.1.0), so cook produced
-# rlibs whose hashes no longer matched the final build, failing with "extern
-# location does not exist". Bumping this token forces a fresh planner and cook
-# when the cache poisons; it can be removed once the cache is healthy
-ARG CHEF_CACHE_BUST=2026-06-27-1
-RUN echo "chef cache bust ${CHEF_CACHE_BUST}"
 # At this stage we don't really bother selecting anything specific, it's fast enough.
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ENV CARGO_INCREMENTAL=0
-ARG CHEF_CACHE_BUST=2026-06-27-1
-RUN echo "chef cache bust ${CHEF_CACHE_BUST}"
 COPY --from=planner /synapse/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
@@ -36,6 +27,13 @@ COPY Cargo.lock Cargo.lock
 COPY Cargo.toml Cargo.toml
 COPY ./crates ./crates
 COPY ./synapse ./synapse
+
+# cargo chef cook builds the workspace crates as stubs to cache dependencies,
+# but leaves their fingerprints while the stub rlibs get cleaned. The final
+# build then treats them as up to date and fails with "extern location does not
+# exist". Drop the workspace fingerprints and artifacts so the real source is
+# recompiled, while keeping the cooked third-party dependency cache
+RUN rm -rf target/release/.fingerprint/synapse* target/release/deps/*synapse*
 
 RUN cargo build --release --bin synapse
 
