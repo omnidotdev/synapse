@@ -14,12 +14,21 @@ ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache
 WORKDIR /synapse
 
 FROM chef AS planner
+# One-time cache-bust: the registry buildcache held a stale cargo-chef recipe
+# from before the workspace version bump (0.0.1 to 0.1.0), so cook produced
+# rlibs whose hashes no longer matched the final build, failing with "extern
+# location does not exist". Bumping this token forces a fresh planner and cook
+# when the cache poisons; it can be removed once the cache is healthy
+ARG CHEF_CACHE_BUST=2026-06-27-1
+RUN echo "chef cache bust ${CHEF_CACHE_BUST}"
 # At this stage we don't really bother selecting anything specific, it's fast enough.
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ENV CARGO_INCREMENTAL=0
+ARG CHEF_CACHE_BUST=2026-06-27-1
+RUN echo "chef cache bust ${CHEF_CACHE_BUST}"
 COPY --from=planner /synapse/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
