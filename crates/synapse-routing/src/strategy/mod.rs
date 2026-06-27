@@ -151,6 +151,26 @@ impl StrategyRegistry {
             }),
         );
 
+        // Register the ONNX strategy only when it is the selected strategy and a
+        // model path is configured, so the model is loaded from disk only when
+        // actually used. A load failure (including the `onnx` feature being
+        // compiled out) degrades gracefully: the strategy is left unregistered
+        // and routing surfaces an "unknown strategy" error rather than panicking
+        if matches!(config.strategy, synapse_config::RoutingStrategy::Onnx) && !config.onnx.model_path.is_empty() {
+            match onnx::OnnxStrategy::load(&config.onnx.model_path) {
+                Ok(strategy) => {
+                    strategies.insert("onnx".to_owned(), Box::new(strategy));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %config.onnx.model_path,
+                        error = %e,
+                        "failed to load ONNX routing model, strategy unavailable"
+                    );
+                }
+            }
+        }
+
         Self { strategies }
     }
 
@@ -171,6 +191,7 @@ impl StrategyRegistry {
             synapse_config::RoutingStrategy::Cost => "cost",
             synapse_config::RoutingStrategy::Cascade => "cascade",
             synapse_config::RoutingStrategy::Score => "score",
+            synapse_config::RoutingStrategy::Onnx => "onnx",
             synapse_config::RoutingStrategy::Custom(name) => name.as_str(),
         }
     }

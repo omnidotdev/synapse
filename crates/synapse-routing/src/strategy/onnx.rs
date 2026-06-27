@@ -1,8 +1,11 @@
 //! ONNX-based ML routing strategy
 //!
-//! Load a pre-trained ONNX model to classify query complexity and select
-//! the optimal model. Training happens offline in Python; inference runs
-//! in Rust via the `ort` crate
+//! Load a pre-trained ONNX model that predicts the *required quality* for a
+//! query (a single scalar in 0.0 to 1.0), then pick the cheapest capability
+//! satisfying model meeting that bar. Predicting a target rather than a model
+//! class keeps the model decoupled from the registry, so adding or removing
+//! models never silently misaligns the output. Training happens offline in
+//! Python (see `ml/`); inference runs in Rust via the `ort` crate
 //!
 //! Enable with the `onnx` feature flag
 
@@ -71,98 +74,102 @@ impl OnnxStrategy {
 }
 
 impl Strategy for OnnxStrategy {
+    // The session guard must live across run + tensor extraction (the output
+    // tensor borrows the session), so it cannot be dropped any earlier than the
+    // inference scope already does
+    #[cfg_attr(feature = "onnx", allow(clippy::significant_drop_tightening))]
     fn route(
         &self,
-        _profile: &QueryProfile,
+        profile: &QueryProfile,
         registry: &ModelRegistry,
         _feedback: Option<&FeedbackTracker>,
     ) -> Result<RoutingDecision, RoutingError> {
         #[cfg(feature = "onnx")]
         {
-            let profiles = registry.profiles();
-
-            if profiles.is_empty() {
+            if registry.profiles().is_empty() {
                 return Err(RoutingError::NoProfiles);
             }
 
-            // Extract features from the query profile
-            let features = profile_to_features(_profile);
+            // Extract features and run inference to predict the required quality
+            let features = profile_to_features(profile);
             let input_array = ndarray::Array2::from_shape_vec((1, NUM_FEATURES), features)
                 .map_err(|e| RoutingError::AnalysisFailed(format!("failed to build input tensor: {e}")))?;
 
-            // Run inference
-            let input_ref = ort::value::TensorRef::from_array_view(&input_array)
-                .map_err(|e| RoutingError::AnalysisFailed(format!("failed to prepare ONNX inputs: {e}")))?;
+            // Run inference inside a scope that yields an owned scalar, so the
+            // session mutex guard is released the instant inference is done and
+            // is never held across model selection
+            let raw_quality: f32 = {
+                let input_ref = ort::value::TensorRef::from_array_view(&input_array)
+                    .map_err(|e| RoutingError::AnalysisFailed(format!("failed to prepare ONNX inputs: {e}")))?;
 
-            let mut session = self
-                .session
-                .lock()
-                .map_err(|e| RoutingError::AnalysisFailed(format!("failed to lock ONNX session: {e}")))?;
+                let mut session = self
+                    .session
+                    .lock()
+                    .map_err(|e| RoutingError::AnalysisFailed(format!("failed to lock ONNX session: {e}")))?;
 
-            let outputs = session
-                .run(ort::inputs![input_ref])
-                .map_err(|e| RoutingError::AnalysisFailed(format!("ONNX inference failed: {e}")))?;
+                let outputs = session
+                    .run(ort::inputs![input_ref])
+                    .map_err(|e| RoutingError::AnalysisFailed(format!("ONNX inference failed: {e}")))?;
 
-            // Extract output probability tensor
-            if outputs.len() == 0 {
-                return Err(RoutingError::AnalysisFailed(
-                    "ONNX model returned no outputs".to_owned(),
-                ));
-            }
-
-            let (_shape, data) = outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| RoutingError::AnalysisFailed(format!("failed to extract output tensor: {e}")))?;
-
-            let probabilities: Vec<f32> = data.to_vec();
-
-            match select_model_from_probabilities(&probabilities, profiles, _profile) {
-                Some(selected) => {
-                    let alternatives = profiles
-                        .iter()
-                        .filter(|p| p.provider != selected.provider || p.model != selected.model)
-                        .map(|p| (p.provider.clone(), p.model.clone()))
-                        .collect();
-
-                    tracing::debug!(
-                        selected_model = %selected.id(),
-                        num_classes = probabilities.len(),
-                        num_profiles = profiles.len(),
-                        "ONNX classifier selected model"
-                    );
-
-                    return Ok(RoutingDecision {
-                        provider: selected.provider.clone(),
-                        model: selected.model.clone(),
-                        reason: crate::RoutingReason::OnnxClassified,
-                        alternatives,
-                    });
+                if outputs.len() == 0 {
+                    return Err(RoutingError::AnalysisFailed(
+                        "ONNX model returned no outputs".to_owned(),
+                    ));
                 }
-                None => {
-                    // Fallback to best quality when ONNX selection fails
-                    tracing::warn!("ONNX model selection failed, falling back to best quality");
 
-                    let best = registry.best_quality().ok_or(RoutingError::NoProfiles)?;
+                let (_shape, data) = outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| RoutingError::AnalysisFailed(format!("failed to extract output tensor: {e}")))?;
 
-                    let alternatives = profiles
-                        .iter()
-                        .filter(|p| p.provider != best.provider || p.model != best.model)
-                        .map(|p| (p.provider.clone(), p.model.clone()))
-                        .collect();
+                *data.first().ok_or_else(|| {
+                    RoutingError::AnalysisFailed("ONNX model returned an empty output tensor".to_owned())
+                })?
+            };
 
-                    return Ok(RoutingDecision {
-                        provider: best.provider.clone(),
-                        model: best.model.clone(),
-                        reason: crate::RoutingReason::BestQuality,
-                        alternatives,
-                    });
-                }
-            }
+            // The model emits a single scalar: the predicted required quality.
+            // Clamp into the valid range to stay robust to a mis-scaled model
+            let required_quality = f64::from(raw_quality).clamp(0.0, 1.0);
+
+            // `registry` is already capability-filtered by the routing engine, so
+            // the cheapest model clearing the predicted bar is a valid choice.
+            // Fall back to best available quality when nothing clears it
+            let (selected, reason) = if let Some(model) = registry.cheapest_above_quality(required_quality) {
+                (model, crate::RoutingReason::OnnxRouted)
+            } else {
+                tracing::warn!(
+                    required_quality,
+                    "no model meets ONNX-predicted quality, falling back to best available"
+                );
+                (
+                    registry.best_quality().ok_or(RoutingError::NoProfiles)?,
+                    crate::RoutingReason::BestQuality,
+                )
+            };
+
+            let alternatives = registry
+                .profiles()
+                .iter()
+                .filter(|p| p.provider != selected.provider || p.model != selected.model)
+                .map(|p| (p.provider.clone(), p.model.clone()))
+                .collect();
+
+            tracing::debug!(
+                selected_model = %selected.id(),
+                required_quality,
+                "ONNX strategy routed by predicted quality"
+            );
+
+            Ok(RoutingDecision {
+                provider: selected.provider.clone(),
+                model: selected.model.clone(),
+                reason,
+                alternatives,
+            })
         }
 
         #[cfg(not(feature = "onnx"))]
         {
-            let _ = registry;
+            let _ = (profile, registry);
             Err(RoutingError::FeatureNotAvailable {
                 feature: "onnx".to_owned(),
             })
@@ -221,59 +228,15 @@ fn profile_to_features(profile: &QueryProfile) -> Vec<f32> {
     ]
 }
 
-/// Select a model from registry profiles using ONNX output probabilities
-///
-/// Performs argmax over the probability vector, mapping the winning index
-/// to a registry profile. If the output dimension does not match the number
-/// of profiles, or the selected model lacks required capabilities, falls back
-/// to the highest-probability model that satisfies capability requirements.
-/// Returns `None` when no valid selection can be made
-#[cfg(feature = "onnx")]
-fn select_model_from_probabilities(
-    probabilities: &[f32],
-    profiles: &[crate::registry::ModelProfile],
-    query: &QueryProfile,
-) -> Option<crate::registry::ModelProfile> {
-    if probabilities.is_empty() || profiles.is_empty() {
-        return None;
+#[cfg(all(test, not(feature = "onnx")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_without_feature_is_unavailable() {
+        // With the `onnx` feature compiled out, loading must fail gracefully
+        // rather than panic, so the registry can skip registering the strategy
+        let err = OnnxStrategy::load("does-not-matter.onnx").unwrap_err();
+        assert!(matches!(err, RoutingError::FeatureNotAvailable { .. }));
     }
-
-    // Sort class indices by descending probability
-    let mut ranked: Vec<(usize, f32)> = probabilities.iter().copied().enumerate().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Walk ranked list and return the first profile that satisfies capabilities
-    for (idx, _prob) in &ranked {
-        if *idx >= profiles.len() {
-            continue;
-        }
-
-        let candidate = &profiles[*idx];
-
-        if satisfies_capabilities(candidate, query) {
-            return Some(candidate.clone());
-        }
-    }
-
-    // No ranked candidate satisfies capabilities, return None so the
-    // caller can fall back to best quality
-    None
-}
-
-/// Check whether a model profile satisfies the query's required capabilities
-#[cfg(feature = "onnx")]
-fn satisfies_capabilities(profile: &crate::registry::ModelProfile, query: &QueryProfile) -> bool {
-    let caps = &query.required_capabilities;
-
-    if caps.tool_calling && !profile.tool_calling {
-        return false;
-    }
-    if caps.vision && !profile.vision {
-        return false;
-    }
-    if caps.long_context && !profile.long_context {
-        return false;
-    }
-
-    true
 }

@@ -223,6 +223,9 @@ pub struct RoutingConfig {
     /// Score strategy configuration
     #[serde(default)]
     pub score: ScoreConfig,
+    /// ONNX ML strategy configuration
+    #[serde(default)]
+    pub onnx: OnnxConfig,
 }
 
 /// Available routing strategies
@@ -238,6 +241,9 @@ pub enum RoutingStrategy {
     Cascade,
     /// Multi-objective weighted scoring (quality + cost + latency)
     Score,
+    /// Learned model: predict the required quality, then pick the cheapest
+    /// capable model meeting it (requires the `onnx` build feature)
+    Onnx,
     /// User-registered custom strategy referenced by name
     Custom(String),
 }
@@ -265,6 +271,16 @@ pub struct ModelProfileConfig {
     /// Model capabilities
     #[serde(default)]
     pub capabilities: ModelCapabilities,
+}
+
+/// Configuration for the ONNX ML routing strategy
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnnxConfig {
+    /// Filesystem path to the trained ONNX model. Empty disables the strategy
+    /// even when the `onnx` build feature is compiled in
+    #[serde(default)]
+    pub model_path: String,
 }
 
 /// Capabilities a model may support
