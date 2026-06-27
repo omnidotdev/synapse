@@ -19,7 +19,7 @@ use axum::Router;
 use synapse_config::Config;
 use synapse_llm::LlmState;
 use synapse_mcp::McpState;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 
 /// Assembled server with all routes and middleware
 pub struct Server {
@@ -259,8 +259,14 @@ impl Server {
         // Request context (innermost; collects auth/identity data, runs just before handlers)
         app = app.layer(axum::middleware::from_fn(request_context::request_context_middleware));
 
-        // Tracing
-        app = app.layer(TraceLayer::new_for_http());
+        // Tracing: INFO-level span per HTTP request so gateway request traces are
+        // captured by the OpenTelemetry layer. The tower-http default span level is
+        // DEBUG, which the `info` subscriber filter drops, so no request spans were
+        // ever exported. This is the foundation for correlating each gateway
+        // request with its downstream agent/LLM (gen_ai) spans.
+        app = app.layer(
+            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+        );
 
         // CORS
         if let Some(ref cors_config) = config.server.cors {
