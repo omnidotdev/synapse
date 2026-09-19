@@ -264,9 +264,7 @@ impl Server {
         // DEBUG, which the `info` subscriber filter drops, so no request spans were
         // ever exported. This is the foundation for correlating each gateway
         // request with its downstream agent/LLM (gen_ai) spans.
-        app = app.layer(
-            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
-        );
+        app = app.layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)));
 
         // CORS
         if let Some(ref cors_config) = config.server.cors {
