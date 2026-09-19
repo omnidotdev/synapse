@@ -106,7 +106,7 @@ tokio-util = "0.7"
 toml = "1.1"
 tonic = "0.14"
 tracing = "0.1"
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = "0.5.3"
 tower-http = "0.6.8"
