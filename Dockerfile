@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:2f7a5c164eafbdbe46fe1d91bd1ab4c8cb5c2bdbd10641c3d61bd39962384cdb
 
 LABEL org.opencontainers.image.url='https://synapse.omni.dev' \
-    org.opencontainers.image.documentation='https://synapse.omni.dev/docs' \
+    org.opencontainers.image.documentation='https://docs.omni.dev/products/synapse' \
     org.opencontainers.image.source='https://github.com/omnidotdev/synapse' \
     org.opencontainers.image.vendor='Omni' \
     org.opencontainers.image.description='Omni Synapse - AI Router' \
