@@ -1,7 +1,7 @@
 <div align="center">
   <h1 align="center">🧠 Synapse</h1>
 
-[Website](https://synapse.omni.dev) | [Docs](https://docs.omni.dev/docs/grid/synapse) | [Feedback](https://github.com/omnidotdev/synapse-stack/issues) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev)
+[Website](https://synapse.omni.dev) | [Docs](https://docs.omni.dev/products/synapse) | [Feedback](https://github.com/omnidotdev/synapse-stack/issues) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev)
 
 </div>
 
