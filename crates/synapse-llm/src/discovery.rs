@@ -102,15 +102,14 @@ async fn fetch_openai_models(client: &Client, config: &LlmProviderConfig) -> Res
 /// and may not return all available models, so we maintain a static
 /// fallback list of commonly available models
 fn static_anthropic_models() -> Vec<String> {
+    // Current first-party lineup, verified served upstream 2026-09-21. The older
+    // claude-4 dated ids and the claude-3 family now 404 upstream, so they are
+    // dropped; explicit `anthropic/<model>` requests bypass this list anyway
+    // (it only backs non-explicit resolution when the models endpoint is down).
     vec![
-        "claude-opus-4-20250514".to_owned(),
-        "claude-sonnet-4-20250514".to_owned(),
+        "claude-opus-4-6".to_owned(),
+        "claude-sonnet-4-5-20250929".to_owned(),
         "claude-haiku-4-5-20251001".to_owned(),
-        "claude-3-5-sonnet-20241022".to_owned(),
-        "claude-3-5-haiku-20241022".to_owned(),
-        "claude-3-opus-20240229".to_owned(),
-        "claude-3-sonnet-20240229".to_owned(),
-        "claude-3-haiku-20240307".to_owned(),
     ]
 }
 
