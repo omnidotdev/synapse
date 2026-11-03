@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.94-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a AS builder
+FROM rust:1.99-slim@sha256:9daf2b244ccc30523e55cafe32edf8465671ba567d0101620e5612ccb76ea1a7 AS builder
 
 RUN apt-get update && apt-get install -y \
     curl \
