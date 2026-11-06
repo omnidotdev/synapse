@@ -87,6 +87,14 @@ impl TokenLimits {
         max_input_tokens: 8192,
         max_output_tokens: 4096,
     };
+
+    /// Emergency ceiling applied when Aether is unreachable under the Degraded
+    /// fail mode. Tighter than free tier so requests still succeed (availability
+    /// preserved) but each is bounded, capping total spend during an outage.
+    pub const EMERGENCY: Self = Self {
+        max_input_tokens: 2048,
+        max_output_tokens: 1024,
+    };
 }
 
 /// How this request should be billed

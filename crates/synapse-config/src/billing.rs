@@ -77,10 +77,18 @@ pub enum OperatingMode {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FailMode {
-    /// Allow requests through when Aether is unreachable
+    /// Allow requests through under an emergency token ceiling when Aether is
+    /// unreachable. Preserves availability during an Aether outage while
+    /// bounding per-request spend (so an outage cannot become unmetered spend),
+    /// and is the safe default. BYOK requests are unaffected (no metering).
     #[default]
+    Degraded,
+    /// Allow requests through on full (free-tier) limits when Aether is
+    /// unreachable. Max availability, but an outage means unbounded free-tier
+    /// spend across the fleet.
     Open,
-    /// Reject requests with 503 when Aether is unreachable
+    /// Reject requests with 503 when Aether is unreachable. Max cost safety, but
+    /// an outage takes AI down.
     Closed,
 }
 
@@ -248,13 +256,13 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.entity_type, "user");
         assert_eq!(config.mode, OperatingMode::Byok);
-        assert_eq!(config.fail_mode, FailMode::Open);
+        assert_eq!(config.fail_mode, FailMode::Degraded);
         assert_eq!(config.entitlement_cache_ttl_secs, 60);
         assert_eq!(config.api_access_feature_key, "api_access");
     }
 
     #[test]
-    fn fail_mode_defaults_to_open() {
+    fn fail_mode_defaults_to_degraded() {
         let toml = r#"
             enabled = true
             billing_url = "https://billing.omni.dev/"
@@ -263,7 +271,21 @@ mod tests {
         "#;
 
         let config: BillingConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.fail_mode, FailMode::Open);
+        assert_eq!(config.fail_mode, FailMode::Degraded);
+    }
+
+    #[test]
+    fn fail_mode_degraded_parses() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            fail_mode = "degraded"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.fail_mode, FailMode::Degraded);
     }
 
     #[test]
@@ -283,7 +305,7 @@ mod tests {
         // request should be rejected with 503 (tested in entitlement.rs
         // via handle_aether_error)
         match config.fail_mode {
-            FailMode::Open => panic!("expected Closed"),
+            FailMode::Open | FailMode::Degraded => panic!("expected Closed"),
             FailMode::Closed => {} // 503 rejection path
         }
     }
@@ -305,7 +327,7 @@ mod tests {
         // request should proceed (tested in entitlement.rs via
         // handle_aether_error and in LlmState::check_credits)
         match config.fail_mode {
-            FailMode::Closed => panic!("expected Open"),
+            FailMode::Closed | FailMode::Degraded => panic!("expected Open"),
             FailMode::Open => {} // allow-through path
         }
     }

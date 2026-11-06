@@ -1237,6 +1237,14 @@ impl LlmState {
                 Ok(())
             }
             Err(e) => match self.inner.billing_fail_mode {
+                FailMode::Degraded => {
+                    tracing::error!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, allowing request under emergency token cap (degraded mode)"
+                    );
+                    Ok(())
+                }
                 FailMode::Open => {
                     tracing::warn!(
                         error = %e,

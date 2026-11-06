@@ -229,7 +229,9 @@ billing_url = "{{ env.BILLING_BASE_URL | default("https://api.billing.omni.dev")
 service_api_key = "{{ env.BILLING_SERVICE_API_KEY }}"
 app_id = "synapse"
 mode = "hybrid"
-fail_mode = "open"
+# Degraded: during an Aether outage keep serving but under an emergency token
+# ceiling, so availability holds without the outage becoming unmetered spend.
+fail_mode = "degraded"
 
 # Modality feature keys (defaults match Aether seed values)
 # stt_feature_key = "stt_enabled"
