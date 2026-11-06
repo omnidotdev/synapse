@@ -134,6 +134,14 @@ impl Server {
                 Ok(())
             }
             Err(e) => match self.billing_fail_mode {
+                FailMode::Degraded => {
+                    tracing::error!(
+                        error = %e,
+                        entity_id = %identity.entity_id,
+                        "credit check failed, allowing STT request (degraded mode)"
+                    );
+                    Ok(())
+                }
                 FailMode::Open => {
                     tracing::warn!(
                         error = %e,

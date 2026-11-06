@@ -211,10 +211,22 @@ const MAX_INPUT_TOKENS_KEY: &str = "max_input_tokens_per_request";
 /// Entitlement feature key for per-request output token limit
 const MAX_OUTPUT_TOKENS_KEY: &str = "max_output_tokens_per_request";
 
+/// Token limits to apply when Aether is unreachable. Under `Degraded` (the
+/// default) this is the tight emergency ceiling so an outage cannot become
+/// unbounded spend; under `Open` (and `Closed`, which never reaches the fallback
+/// because the gate rejects first) it is the full free-tier allowance.
+fn fallback_token_limits(fail_mode: &FailMode) -> TokenLimits {
+    if *fail_mode == FailMode::Degraded {
+        TokenLimits::EMERGENCY
+    } else {
+        TokenLimits::FREE_TIER
+    }
+}
+
 /// Resolve per-request token limits from Aether entitlements
 ///
-/// Falls back to free-tier defaults when Aether is unreachable or the
-/// entitlement values are missing
+/// Falls back to emergency/free-tier defaults (per fail mode) when Aether is
+/// unreachable or the entitlement values are missing
 async fn resolve_token_limits(state: &EntitlementState, entity_type: &str, entity_id: &str) -> TokenLimits {
     // Check cache first
     if let Some(cached) = state.cache.get_token_limits(entity_type, entity_id) {
@@ -235,11 +247,18 @@ async fn resolve_token_limits(state: &EntitlementState, entity_type: &str, entit
             }
         }
         Err(e) => {
-            tracing::warn!(
+            // Aether is unreachable. Under Degraded (the default) clamp to the
+            // emergency ceiling so outage spend is bounded; otherwise fall back
+            // to full free-tier limits. Error-level: a fallback means Aether is
+            // down and spend is running on defaults, not real entitlements.
+            let limits = fallback_token_limits(&state.config.fail_mode);
+            tracing::error!(
                 error = %e,
-                "failed to fetch entitlements for token limits, using free-tier defaults"
+                fail_mode = ?state.config.fail_mode,
+                ?limits,
+                "failed to fetch entitlements for token limits, using fallback limits"
             );
-            TokenLimits::FREE_TIER
+            limits
         }
     };
 
@@ -270,6 +289,15 @@ async fn handle_aether_error(
     next: Next,
 ) -> Response {
     match fail_mode {
+        FailMode::Degraded => {
+            // Alert-level: a degraded serve means Aether is down and spend is
+            // running on the emergency ceiling, not real entitlements.
+            tracing::error!(
+                error = %error,
+                "Aether unreachable, allowing request through under emergency token cap (degraded mode)"
+            );
+            next.run(request).await
+        }
         FailMode::Open => {
             tracing::warn!(
                 error = %error,
@@ -284,5 +312,25 @@ async fn handle_aether_error(
             );
             (StatusCode::SERVICE_UNAVAILABLE, "billing service unavailable").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_clamps_to_emergency_under_degraded() {
+        assert_eq!(fallback_token_limits(&FailMode::Degraded), TokenLimits::EMERGENCY);
+    }
+
+    #[test]
+    fn fallback_uses_free_tier_under_open() {
+        assert_eq!(fallback_token_limits(&FailMode::Open), TokenLimits::FREE_TIER);
+    }
+
+    #[test]
+    fn fallback_uses_free_tier_under_closed() {
+        assert_eq!(fallback_token_limits(&FailMode::Closed), TokenLimits::FREE_TIER);
     }
 }
