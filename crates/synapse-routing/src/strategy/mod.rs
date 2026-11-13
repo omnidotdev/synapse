@@ -221,6 +221,7 @@ mod tests {
                 output_per_mtok: 15.0,
                 quality: 0.92,
                 capabilities: ModelCapabilities::default(),
+                long_context_pricing: None,
             },
             ModelProfileConfig {
                 provider: "openai".to_owned(),
@@ -230,6 +231,7 @@ mod tests {
                 output_per_mtok: 0.60,
                 quality: 0.78,
                 capabilities: ModelCapabilities::default(),
+                long_context_pricing: None,
             },
         ])
     }

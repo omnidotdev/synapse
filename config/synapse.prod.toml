@@ -85,10 +85,10 @@ vision = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-opus-4-6"
-input_per_mtok = 15.00
-output_per_mtok = 75.00
+input_per_mtok = 5.00
+output_per_mtok = 25.00
 quality = 0.97
-context_window = 200000
+context_window = 1000000
 [llm.routing.models.capabilities]
 tool_calling = true
 vision = true
@@ -109,13 +109,90 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-haiku-4-5-20251001"
-input_per_mtok = 0.80
-output_per_mtok = 4.00
+input_per_mtok = 1.00
+output_per_mtok = 5.00
 quality = 0.75
 context_window = 200000
 [llm.routing.models.capabilities]
 tool_calling = true
 vision = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-opus-5-5"
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+quality = 0.98
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+quality = 0.95
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-haiku-5-5"
+input_per_mtok = 0.10
+output_per_mtok = 0.50
+quality = 0.85
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+# Prompts over 100K tokens bill the whole request at the higher rate
+[llm.routing.models.long_context_pricing]
+above_input_tokens = 100000
+input_per_mtok = 0.50
+output_per_mtok = 2.50
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-opus-5"
+input_per_mtok = 5.00
+output_per_mtok = 25.00
+quality = 0.97
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-sonnet-5"
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+quality = 0.94
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
+model = "claude-opus-4-8"
+input_per_mtok = 5.00
+output_per_mtok = 25.00
+quality = 0.97
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
 
 [[llm.routing.models]]
 provider = "openai"
