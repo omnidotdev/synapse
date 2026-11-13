@@ -20,6 +20,8 @@ pub struct Server {
     /// Behavior when billing service is unreachable
     #[cfg(feature = "billing")]
     billing_fail_mode: FailMode,
+    #[cfg(feature = "billing")]
+    margins: synapse_core::MarginPolicy,
 }
 
 impl Server {
@@ -35,9 +37,25 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+    pub fn set_billing_client(
+        &mut self,
+        client: synapse_billing::AetherClient,
+        fail_mode: FailMode,
+        margins: synapse_core::MarginPolicy,
+    ) {
         self.billing_client = Some(client);
         self.billing_fail_mode = fail_mode;
+        self.margins = margins;
+    }
+
+    /// Amount to charge the request's billing identity for usage costing
+    /// `base_usd` upstream, marked up for the billed product
+    #[cfg(feature = "billing")]
+    fn charge(&self, context: &RequestContext, provider_name: &str, base_usd: f64) -> f64 {
+        context
+            .billing_identity
+            .as_ref()
+            .map_or(0.0, |identity| self.margins.charge(identity, provider_name, base_usd))
     }
 
     /// Generate images using the appropriate provider
@@ -68,7 +86,7 @@ impl Server {
         // Pre-request credit check for managed billing
         #[cfg(feature = "billing")]
         {
-            let estimated_cost = Self::estimate_image_cost(request);
+            let estimated_cost = self.charge(context, provider.name(), Self::estimate_image_cost(request));
             if estimated_cost > 0.0 {
                 self.check_credits(context, estimated_cost).await?;
             }
@@ -193,11 +211,7 @@ impl Server {
             provider: provider_name.to_owned(),
             input_tokens: if is_byok { 0 } else { request.n },
             output_tokens: 0,
-            estimated_cost_usd: if is_byok {
-                0.0
-            } else {
-                Self::estimate_image_cost(request)
-            },
+            estimated_cost_usd: self.charge(context, provider_name, Self::estimate_image_cost(request)),
             idempotency_key: request_id.to_owned(),
         });
     }
@@ -223,7 +237,7 @@ impl Server {
             return;
         }
 
-        let actual_cost = Self::estimate_image_cost(request);
+        let actual_cost = self.charge(context, provider_name, Self::estimate_image_cost(request));
 
         if actual_cost <= 0.0 {
             return;
@@ -304,6 +318,8 @@ impl<'a> ImageGenServerBuilder<'a> {
             billing_client: None,
             #[cfg(feature = "billing")]
             billing_fail_mode: FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
         })
     }
 }

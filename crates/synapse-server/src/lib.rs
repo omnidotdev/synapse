@@ -74,13 +74,14 @@ impl Server {
                 managed_margins.insert(name.clone(), provider_config.margin);
             }
             llm_state.set_managed_keys(managed_keys);
-            llm_state.set_margin_policy(synapse_llm::MarginPolicy {
+            let margins = synapse_core::MarginPolicy {
                 default_app_id: billing_config.app_id.clone(),
                 provider_margins: managed_margins,
                 tier_margins: billing_config.tier_margins.clone(),
                 product_margins: billing_config.product_margins.clone(),
                 default_product_margin: billing_config.default_product_margin,
-            });
+            };
+            llm_state.set_margin_policy(margins.clone());
 
             // Attach usage recorder for LLM
             let recorder_client = synapse_billing::AetherClient::new(
@@ -121,7 +122,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let stt = Arc::get_mut(&mut stt_state).expect("STT state not yet shared");
-                stt.set_billing_client(client, billing_config.fail_mode.clone());
+                stt.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
                 stt.set_usage_recorder(recorder);
             }
 
@@ -143,7 +144,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let tts = Arc::get_mut(&mut tts_state).expect("TTS state not yet shared");
-                tts.set_billing_client(client, billing_config.fail_mode.clone());
+                tts.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
                 tts.set_usage_recorder(recorder);
             }
 
@@ -165,7 +166,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let emb = Arc::get_mut(&mut embeddings_state).expect("embeddings state not yet shared");
-                emb.set_billing_client(client, billing_config.fail_mode.clone());
+                emb.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
                 emb.set_usage_recorder(recorder);
             }
 
@@ -187,7 +188,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let img = Arc::get_mut(&mut imagegen_state).expect("imagegen state not yet shared");
-                img.set_billing_client(client, billing_config.fail_mode.clone());
+                img.set_billing_client(client, billing_config.fail_mode.clone(), margins);
                 img.set_usage_recorder(recorder);
             }
         }

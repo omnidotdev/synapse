@@ -14,10 +14,10 @@ use synapse_routing::{FeedbackTracker, ModelRegistry, RequestFeedback, StrategyR
 use crate::discovery;
 use crate::error::LlmError;
 use crate::health::ProviderHealthTracker;
-use crate::margin::MarginPolicy;
 use crate::provider::Provider;
 use crate::routing::ModelRouter;
 use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
+use synapse_core::MarginPolicy;
 
 /// Virtual model names that trigger smart routing
 pub(crate) const ROUTING_CLASSES: &[&str] = &["auto", "fast", "best", "cheap"];
