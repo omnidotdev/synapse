@@ -92,6 +92,9 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// Any other block (e.g. thinking replayed by a client), ignored
+    #[serde(other)]
+    Unknown,
 }
 
 /// Anthropic image source
@@ -174,12 +177,16 @@ pub enum AnthropicResponseBlock {
         /// Tool input as JSON
         input: serde_json::Value,
     },
+    /// Any other block (e.g. `thinking`, `redacted_thinking`), ignored
+    #[serde(other)]
+    Unknown,
 }
 
 /// Anthropic token usage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicUsage {
-    /// Input tokens
+    /// Input tokens (absent from some `message_delta` usage payloads)
+    #[serde(default)]
     pub input_tokens: u32,
     /// Output tokens
     pub output_tokens: u32,
@@ -227,6 +234,9 @@ pub enum AnthropicStreamEvent {
     MessageStop,
     /// Ping event for keep-alive
     Ping,
+    /// Any other event type, ignored
+    #[serde(other)]
+    Unknown,
 }
 
 /// Partial message in a `message_start` event
@@ -264,6 +274,9 @@ pub enum AnthropicStreamContentBlock {
         /// Initial input (usually empty object)
         input: serde_json::Value,
     },
+    /// Any other block (e.g. `thinking`), ignored
+    #[serde(other)]
+    Unknown,
 }
 
 /// Delta content in a `content_block_delta` event
@@ -280,6 +293,9 @@ pub enum AnthropicStreamDelta {
         /// JSON fragment
         partial_json: String,
     },
+    /// Any other delta (e.g. `thinking_delta`, `signature_delta`), ignored
+    #[serde(other)]
+    Unknown,
 }
 
 /// Delta in a `message_delta` event

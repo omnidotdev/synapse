@@ -16,6 +16,52 @@ use crate::types::{
 /// Default max tokens when not specified (Anthropic requires this field)
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Family and `(major, minor)` version of a Claude model id, e.g.
+/// `claude-opus-5-5` is `("opus", (5, 5))` and `claude-sonnet-4-5-20250929`
+/// is `("sonnet", (4, 5))`. `None` for ids that are not current-scheme
+/// Claude ids (legacy `claude-3-...` or a non-Claude model)
+fn claude_version(model: &str) -> Option<(&str, (u32, u32))> {
+    let rest = model.strip_prefix("claude-")?;
+    let (family, version) = rest.split_once('-')?;
+    // Legacy ids lead with the version (`claude-3-5-haiku-...`)
+    if !family.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut parts = version.split('-');
+    let major = parts.next()?.parse().ok()?;
+    // A dated snapshot suffix (8 digits) is not a minor version
+    let minor = parts
+        .next()
+        .filter(|p| p.len() <= 2)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((family, (major, minor)))
+}
+
+/// Whether the model accepts `temperature` / `top_p` / `top_k`
+///
+/// Claude models after the 4.6 generation reject sampling parameters with a
+/// 400, so they are dropped rather than failing the request
+fn accepts_sampling_params(model: &str) -> bool {
+    match claude_version(model) {
+        Some(("fable" | "mythos", _)) => false,
+        Some((_, version)) => version <= (4, 6),
+        None => true,
+    }
+}
+
+/// Whether the model accepts a forced `tool_choice` (`any` or a named tool)
+///
+/// Opus and Sonnet from 5.5 and Fable / Mythos from 5.1 reject it with a 400,
+/// so a forced choice degrades to `auto` there
+fn accepts_forced_tool_choice(model: &str) -> bool {
+    match claude_version(model) {
+        Some(("opus" | "sonnet", version)) => version < (5, 5),
+        Some(("fable" | "mythos", version)) => version < (5, 1),
+        _ => true,
+    }
+}
+
 // -- Inbound: Anthropic wire format -> internal types --
 
 impl From<AnthropicRequest> for CompletionRequest {
@@ -106,6 +152,7 @@ fn anthropic_message_to_internal(msg: AnthropicMessage) -> Message {
                         tool_call_id = Some(tool_use_id);
                         tool_result_content = content;
                     }
+                    AnthropicContentBlock::Unknown => {}
                 }
             }
 
@@ -205,15 +252,19 @@ impl From<&CompletionRequest> for AnthropicRequest {
                 .collect()
         });
 
-        let tool_choice = req.tool_choice.as_ref().map(internal_tool_choice_to_anthropic);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(|choice| internal_tool_choice_to_anthropic(choice, accepts_forced_tool_choice(&req.model)));
+        let sampling = accepts_sampling_params(&req.model);
 
         Self {
             model: req.model.clone(),
             max_tokens: req.params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             system,
             messages,
-            temperature: req.params.temperature,
-            top_p: req.params.top_p,
+            temperature: req.params.temperature.filter(|_| sampling),
+            top_p: req.params.top_p.filter(|_| sampling),
             top_k: None,
             stop_sequences: req.params.stop.clone(),
             stream: if req.stream { Some(true) } else { None },
@@ -312,23 +363,33 @@ fn internal_message_to_anthropic(msg: &Message) -> AnthropicMessage {
 }
 
 /// Convert internal tool choice to Anthropic wire format
-fn internal_tool_choice_to_anthropic(choice: &ToolChoice) -> AnthropicToolChoice {
+///
+/// When the model rejects a forced choice, `required` and a named function
+/// degrade to `auto`
+fn internal_tool_choice_to_anthropic(choice: &ToolChoice, forced_allowed: bool) -> AnthropicToolChoice {
+    let simple = |choice_type: &str| AnthropicToolChoice {
+        choice_type: choice_type.to_owned(),
+        name: None,
+    };
     match choice {
-        ToolChoice::Mode(mode) => match mode {
-            // Anthropic has no "none" mode; map both None and Auto to "auto"
-            ToolChoiceMode::None | ToolChoiceMode::Auto => AnthropicToolChoice {
-                choice_type: "auto".to_owned(),
-                name: None,
-            },
-            ToolChoiceMode::Required => AnthropicToolChoice {
-                choice_type: "any".to_owned(),
-                name: None,
-            },
-        },
-        ToolChoice::Function(func) => AnthropicToolChoice {
+        ToolChoice::Mode(ToolChoiceMode::None) => simple("none"),
+        ToolChoice::Mode(ToolChoiceMode::Required) if forced_allowed => simple("any"),
+        ToolChoice::Function(func) if forced_allowed => AnthropicToolChoice {
             choice_type: "tool".to_owned(),
             name: Some(func.function.name.clone()),
         },
+        ToolChoice::Mode(ToolChoiceMode::Auto | ToolChoiceMode::Required) | ToolChoice::Function(_) => simple("auto"),
+    }
+}
+
+/// Map an Anthropic stop reason to the internal finish reason
+fn finish_reason(stop_reason: &str) -> Option<FinishReason> {
+    match stop_reason {
+        "end_turn" | "stop" | "stop_sequence" => Some(FinishReason::Stop),
+        "max_tokens" | "model_context_window_exceeded" => Some(FinishReason::Length),
+        "tool_use" => Some(FinishReason::ToolCalls),
+        "refusal" => Some(FinishReason::ContentFilter),
+        _ => None,
     }
 }
 
@@ -359,15 +420,11 @@ impl From<AnthropicResponse> for CompletionResponse {
                         },
                     });
                 }
+                AnthropicResponseBlock::Unknown => {}
             }
         }
 
-        let finish_reason = resp.stop_reason.as_deref().and_then(|s| match s {
-            "end_turn" | "stop" => Some(FinishReason::Stop),
-            "max_tokens" => Some(FinishReason::Length),
-            "tool_use" => Some(FinishReason::ToolCalls),
-            _ => None,
-        });
+        let finish_reason = resp.stop_reason.as_deref().and_then(finish_reason);
 
         let message = if tool_calls.is_empty() {
             ChoiceMessage {
@@ -477,6 +534,9 @@ pub struct AnthropicStreamState {
     current_tool_call_index: u32,
     /// Counter used to assign the next tool call its sequential index
     next_tool_call_index: u32,
+    /// Input tokens reported by `message_start`, used when the final
+    /// `message_delta` usage reports output tokens only
+    input_tokens: u32,
 }
 
 impl AnthropicStreamState {
@@ -485,15 +545,41 @@ impl AnthropicStreamState {
         Self::default()
     }
 
+    /// Parse one SSE `data` payload and convert it to internal stream events
+    ///
+    /// Returns every converted event: a `message_delta` carries both the stop
+    /// reason and the usage that billing meters, so keeping only the first
+    /// event drops usage. Unparseable payloads are skipped
+    pub fn convert_sse_data(&mut self, data: &str) -> Vec<StreamEvent> {
+        let data = data.trim();
+        if data.is_empty() {
+            return Vec::new();
+        }
+        match serde_json::from_str::<AnthropicStreamEvent>(data) {
+            Ok(event) => self.convert_event(&event),
+            Err(e) => {
+                tracing::debug!(error = %e, "skipping unparseable Anthropic SSE event");
+                Vec::new()
+            }
+        }
+    }
+
     /// Convert an Anthropic stream event to internal stream events
     pub fn convert_event(&mut self, event: &AnthropicStreamEvent) -> Vec<StreamEvent> {
         match event {
-            AnthropicStreamEvent::MessageStart { .. } | AnthropicStreamEvent::Ping => Vec::new(),
+            AnthropicStreamEvent::MessageStart { message } => {
+                if let Some(usage) = &message.usage {
+                    self.input_tokens = usage.input_tokens;
+                }
+                Vec::new()
+            }
+
+            AnthropicStreamEvent::Ping | AnthropicStreamEvent::Unknown => Vec::new(),
 
             AnthropicStreamEvent::ContentBlockStart { index, content_block } => {
                 self.current_block_index = *index;
                 match content_block {
-                    AnthropicStreamContentBlock::Text { .. } => Vec::new(),
+                    AnthropicStreamContentBlock::Text { .. } | AnthropicStreamContentBlock::Unknown => Vec::new(),
                     AnthropicStreamContentBlock::ToolUse { id, name, .. } => {
                         self.current_tool = Some((id.clone(), name.clone()));
                         self.current_tool_call_index = self.next_tool_call_index;
@@ -541,6 +627,7 @@ impl AnthropicStreamState {
                         finish_reason: None,
                     })]
                 }
+                AnthropicStreamDelta::Unknown => Vec::new(),
             },
 
             AnthropicStreamEvent::ContentBlockStop { .. } => {
@@ -552,12 +639,7 @@ impl AnthropicStreamState {
             AnthropicStreamEvent::MessageDelta { delta, usage } => {
                 let mut events = Vec::new();
 
-                let finish_reason = delta.stop_reason.as_deref().and_then(|s| match s {
-                    "end_turn" | "stop" => Some(FinishReason::Stop),
-                    "max_tokens" => Some(FinishReason::Length),
-                    "tool_use" => Some(FinishReason::ToolCalls),
-                    _ => None,
-                });
+                let finish_reason = delta.stop_reason.as_deref().and_then(finish_reason);
 
                 if finish_reason.is_some() {
                     events.push(StreamEvent::Delta(StreamDelta {
@@ -569,10 +651,11 @@ impl AnthropicStreamState {
                 }
 
                 if let Some(usage) = usage {
+                    let input_tokens = usage.input_tokens.max(self.input_tokens);
                     events.push(StreamEvent::Usage(Usage {
-                        prompt_tokens: usage.input_tokens,
+                        prompt_tokens: input_tokens,
                         completion_tokens: usage.output_tokens,
-                        total_tokens: usage.input_tokens + usage.output_tokens,
+                        total_tokens: input_tokens + usage.output_tokens,
                     }));
                 }
 
@@ -648,5 +731,234 @@ pub fn internal_to_anthropic_stream_events(
         StreamEvent::Done => {
             vec![AnthropicStreamEvent::MessageStop]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn request(model: &str, extra: &serde_json::Value) -> CompletionRequest {
+        let mut body = json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mut req: CompletionRequest = serde_json::from_value(json!({
+            "model": body["model"],
+            "messages": body["messages"],
+            "tools": body["tools"],
+            "tool_choice": body.get("tool_choice").cloned(),
+        }))
+        .unwrap();
+        req.params.temperature = body["temperature"].as_f64();
+        req.params.top_p = body["top_p"].as_f64();
+        req
+    }
+
+    fn wire(model: &str, extra: &serde_json::Value) -> AnthropicRequest {
+        (&request(model, extra)).into()
+    }
+
+    #[test]
+    fn sampling_params_are_dropped_for_models_that_reject_them() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-fable-5-2",
+        ] {
+            let req = wire(model, &json!({}));
+            assert_eq!(req.temperature, None, "{model} kept temperature");
+            assert_eq!(req.top_p, None, "{model} kept top_p");
+        }
+    }
+
+    #[test]
+    fn sampling_params_are_kept_for_models_that_accept_them() {
+        for model in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5-20250929",
+            "claude-3-5-haiku-20241022",
+            "some-anthropic-compatible-model",
+        ] {
+            let req = wire(model, &json!({}));
+            assert_eq!(req.temperature, Some(0.7), "{model} dropped temperature");
+            assert_eq!(req.top_p, Some(0.9), "{model} dropped top_p");
+        }
+    }
+
+    fn tool_choice_type(model: &str, choice: &serde_json::Value) -> String {
+        wire(model, &json!({ "tool_choice": choice }))
+            .tool_choice
+            .unwrap()
+            .choice_type
+    }
+
+    #[test]
+    fn forced_tool_choice_becomes_auto_where_it_is_rejected() {
+        let named = json!({"type": "function", "function": {"name": "lookup"}});
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-2",
+            "claude-fable-5-1",
+        ] {
+            assert_eq!(tool_choice_type(model, &json!("required")), "auto", "{model}");
+            let req = wire(model, &json!({ "tool_choice": named }));
+            let choice = req.tool_choice.unwrap();
+            assert_eq!(choice.choice_type, "auto", "{model}");
+            assert_eq!(choice.name, None, "{model}");
+        }
+    }
+
+    #[test]
+    fn forced_tool_choice_is_kept_where_it_is_accepted() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+            "claude-sonnet-4-6",
+        ] {
+            assert_eq!(tool_choice_type(model, &json!("required")), "any", "{model}");
+        }
+    }
+
+    #[test]
+    fn tool_choice_none_maps_to_none() {
+        assert_eq!(tool_choice_type("claude-opus-5-5", &json!("none")), "none");
+    }
+
+    #[test]
+    fn response_with_thinking_blocks_parses_and_keeps_text() {
+        let resp: AnthropicResponse = serde_json::from_value(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "abc"},
+                {"type": "text", "text": "answer"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 0}
+        }))
+        .unwrap();
+        let out: CompletionResponse = resp.into();
+        assert_eq!(out.choices[0].message.content.as_deref(), Some("answer"));
+        assert_eq!(out.usage.unwrap().completion_tokens, 20);
+    }
+
+    #[test]
+    fn refusal_maps_to_content_filter() {
+        let resp: AnthropicResponse = serde_json::from_value(json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "content": [], "stop_reason": "refusal",
+            "usage": {"input_tokens": 1, "output_tokens": 0}
+        }))
+        .unwrap();
+        let out: CompletionResponse = resp.into();
+        assert_eq!(out.choices[0].finish_reason, Some(FinishReason::ContentFilter));
+    }
+
+    fn sse(state: &mut AnthropicStreamState, events: &[serde_json::Value]) -> Vec<StreamEvent> {
+        events
+            .iter()
+            .flat_map(|e| state.convert_sse_data(&e.to_string()))
+            .collect()
+    }
+
+    fn usage_of(events: &[StreamEvent]) -> Vec<(u32, u32)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Usage(u) => Some((u.prompt_tokens, u.completion_tokens)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stream_reports_usage_alongside_the_stop_reason() {
+        let mut state = AnthropicStreamState::new();
+        let events = sse(
+            &mut state,
+            &[
+                json!({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant",
+                    "model": "claude-opus-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 42}}),
+                json!({"type": "message_stop"}),
+            ],
+        );
+        // Output-only delta usage falls back to the input count from message_start
+        assert_eq!(usage_of(&events), vec![(100, 42)]);
+        assert!(events.iter().any(|e| matches!(e,
+            StreamEvent::Delta(d) if d.finish_reason == Some(FinishReason::Stop))));
+        assert!(matches!(events.last(), Some(StreamEvent::Done)));
+    }
+
+    #[test]
+    fn stream_skips_thinking_blocks_and_keeps_tool_indexes() {
+        let mut state = AnthropicStreamState::new();
+        let events = sse(
+            &mut state,
+            &[
+                json!({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant",
+                    "model": "claude-opus-5-5", "usage": {"input_tokens": 5, "output_tokens": 1}}}),
+                json!({"type": "content_block_start", "index": 0,
+                    "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+                json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+                json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "signature_delta", "signature": "s"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "content_block_start", "index": 1,
+                    "content_block": {"type": "tool_use", "id": "t1", "name": "lookup", "input": {}}}),
+                json!({"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+                json!({"type": "content_block_stop", "index": 1}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+                    "usage": {"input_tokens": 5, "output_tokens": 30}}),
+                json!({"type": "message_stop"}),
+            ],
+        );
+        let tool_indexes: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(d) => d.tool_call.as_ref().map(|t| t.index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_indexes, vec![0, 0]);
+        assert!(!events.iter().any(|e| matches!(e,
+            StreamEvent::Delta(d) if d.content.as_deref() == Some("hmm"))));
+        assert_eq!(usage_of(&events), vec![(5, 30)]);
+    }
+
+    #[test]
+    fn stream_ignores_unparseable_and_unknown_events() {
+        let mut state = AnthropicStreamState::new();
+        assert!(state.convert_sse_data("not json").is_empty());
+        assert!(
+            state
+                .convert_sse_data(&json!({"type": "some_future_event"}).to_string())
+                .is_empty()
+        );
     }
 }

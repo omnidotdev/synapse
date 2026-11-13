@@ -247,7 +247,9 @@ const fn anthropic_event_type(event: &crate::protocol::anthropic::AnthropicStrea
         AnthropicStreamEvent::ContentBlockStop { .. } => "content_block_stop",
         AnthropicStreamEvent::MessageDelta { .. } => "message_delta",
         AnthropicStreamEvent::MessageStop => "message_stop",
-        AnthropicStreamEvent::Ping => "ping",
+        // Unknown only exists for parsing upstream events and is never emitted;
+        // if it were, clients ignore pings
+        AnthropicStreamEvent::Ping | AnthropicStreamEvent::Unknown => "ping",
     }
 }
 

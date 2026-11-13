@@ -14,7 +14,7 @@ use url::Url;
 use super::{Provider, ProviderCapabilities};
 use crate::convert::anthropic::AnthropicStreamState;
 use crate::error::LlmError;
-use crate::protocol::anthropic::{AnthropicRequest, AnthropicResponse, AnthropicStreamEvent};
+use crate::protocol::anthropic::{AnthropicRequest, AnthropicResponse};
 use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
 
 /// Default Anthropic API base URL
@@ -195,32 +195,15 @@ impl Provider for AnthropicProvider {
         let event_stream = response.bytes_stream().eventsource();
         let mut state = AnthropicStreamState::new();
 
-        let mapped = event_stream.filter_map(move |result| {
-            let events: Option<Result<StreamEvent, LlmError>> = match &result {
-                Ok(event) => {
-                    let data = event.data.trim();
-                    if data.is_empty() {
-                        None
-                    } else {
-                        match serde_json::from_str::<AnthropicStreamEvent>(data) {
-                            Ok(stream_event) => {
-                                let converted = state.convert_event(&stream_event);
-                                converted.into_iter().next().map(Ok)
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    error = %e,
-                                    "skipping unparseable Anthropic SSE event"
-                                );
-                                None
-                            }
-                        }
-                    }
-                }
-                Err(e) => Some(Err(LlmError::Streaming(e.to_string()))),
+        // A single SSE event can convert to several internal events (the final
+        // `message_delta` carries both the stop reason and the billed usage),
+        // so every converted event is forwarded
+        let mapped = event_stream.flat_map(move |result| {
+            let events: Vec<Result<StreamEvent, LlmError>> = match result {
+                Ok(event) => state.convert_sse_data(&event.data).into_iter().map(Ok).collect(),
+                Err(e) => vec![Err(LlmError::Streaming(e.to_string()))],
             };
-
-            async move { events }
+            futures_util::stream::iter(events)
         });
 
         Ok(Box::pin(mapped))
