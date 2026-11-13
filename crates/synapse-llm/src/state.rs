@@ -630,7 +630,12 @@ impl LlmState {
             };
 
             match client
-                .check_entitlement(&identity.entity_type, &identity.entity_id, "smart_routing")
+                .check_entitlement(
+                    &identity.app_id,
+                    &identity.entity_type,
+                    &identity.entity_id,
+                    "smart_routing",
+                )
                 .await
             {
                 Ok(resp) => resp.has_access,
@@ -1245,7 +1250,12 @@ impl LlmState {
         };
 
         match client
-            .check_credits(&identity.entity_type, &identity.entity_id, estimated_cost)
+            .check_credits(
+                &identity.app_id,
+                &identity.entity_type,
+                &identity.entity_id,
+                estimated_cost,
+            )
             .await
         {
             Ok(response) => {
@@ -1342,7 +1352,7 @@ impl LlmState {
         };
 
         if let Err(e) = client
-            .deduct_credits(&identity.entity_type, &identity.entity_id, &request)
+            .deduct_credits(&identity.app_id, &identity.entity_type, &identity.entity_id, &request)
             .await
         {
             tracing::warn!(
@@ -1392,6 +1402,7 @@ fn spawn_credit_deduction(
         return;
     }
 
+    let app_id = identity.app_id.clone();
     let entity_type = identity.entity_type.clone();
     let entity_id = identity.entity_id.clone();
     let desc = format!("{provider_name}/{model_id}");
@@ -1405,7 +1416,7 @@ fn spawn_credit_deduction(
             reference_id: None,
         };
 
-        if let Err(e) = client.deduct_credits(&entity_type, &entity_id, &request).await {
+        if let Err(e) = client.deduct_credits(&app_id, &entity_type, &entity_id, &request).await {
             tracing::warn!(
                 error = %e,
                 entity_id = %entity_id,
@@ -1458,6 +1469,7 @@ fn dispatch_usage_event(
     let idempotency_key = uuid::Uuid::new_v4().to_string();
 
     recorder.record(synapse_billing::UsageEvent {
+        app_id: identity.app_id.clone(),
         entity_type: identity.entity_type.clone(),
         entity_id: identity.entity_id.clone(),
         model: model_id.to_owned(),

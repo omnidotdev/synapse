@@ -121,7 +121,12 @@ impl Server {
         }
 
         match client
-            .check_credits(&identity.entity_type, &identity.entity_id, estimated_cost)
+            .check_credits(
+                &identity.app_id,
+                &identity.entity_type,
+                &identity.entity_id,
+                estimated_cost,
+            )
             .await
         {
             Ok(response) => {
@@ -184,6 +189,7 @@ impl Server {
 
         // For BYOK, zero out tokens; only the request count is metered
         recorder.record(synapse_billing::UsageEvent {
+            app_id: identity.app_id.clone(),
             entity_type: identity.entity_type.clone(),
             entity_id: identity.entity_id.clone(),
             model: model_id.to_owned(),
@@ -234,7 +240,7 @@ impl Server {
         };
 
         if let Err(e) = client
-            .deduct_credits(&identity.entity_type, &identity.entity_id, &request)
+            .deduct_credits(&identity.app_id, &identity.entity_type, &identity.entity_id, &request)
             .await
         {
             tracing::warn!(

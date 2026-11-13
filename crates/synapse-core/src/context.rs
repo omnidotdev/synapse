@@ -61,6 +61,13 @@ impl RequestContext {
 /// Billing identity resolved from authentication state
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingIdentity {
+    /// Product this request bills against in Aether (the `appId` path segment).
+    ///
+    /// Resolved per request: a provisioned product key carries its own
+    /// `app_id` (e.g. "facet"); absent that, it falls back to the gateway's
+    /// configured default app so existing single-product deployments are
+    /// unchanged.
+    pub app_id: String,
     /// Entity type (e.g. "user")
     pub entity_type: String,
     /// Entity identifier (e.g. user ID from JWT sub claim)

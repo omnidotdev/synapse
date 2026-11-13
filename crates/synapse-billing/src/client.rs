@@ -12,11 +12,14 @@ use crate::types::{
 };
 
 /// Async HTTP client for the Aether billing API
+///
+/// The client is shared across all requests; the `app_id` a call bills
+/// against is passed per call so one gateway can meter multiple products
+/// (each request resolves its own product from the API key).
 #[derive(Clone)]
 pub struct AetherClient {
     http: reqwest::Client,
     base_url: Url,
-    app_id: String,
     service_api_key: SecretString,
     circuit: CircuitBreaker,
 }
@@ -27,7 +30,7 @@ impl AetherClient {
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be built
-    pub fn new(base_url: Url, app_id: String, service_api_key: SecretString) -> Result<Self, BillingError> {
+    pub fn new(base_url: Url, service_api_key: SecretString) -> Result<Self, BillingError> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
@@ -37,7 +40,6 @@ impl AetherClient {
         Ok(Self {
             http,
             base_url,
-            app_id,
             service_api_key,
             circuit: CircuitBreaker::new(),
         })
@@ -50,8 +52,10 @@ impl AetherClient {
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or Aether returns an error
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_usage(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
         meter_key: &str,
@@ -61,10 +65,7 @@ impl AetherClient {
     ) -> Result<RecordUsageResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!(
-                "usage/{}/{entity_type}/{entity_id}/{meter_key}/record",
-                self.app_id
-            ))
+            .join(&format!("usage/{app_id}/{entity_type}/{entity_id}/{meter_key}/record"))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -113,6 +114,7 @@ impl AetherClient {
     /// Returns an error if the HTTP request fails or Aether returns an error
     pub async fn check_usage(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
         meter_key: &str,
@@ -120,10 +122,7 @@ impl AetherClient {
     ) -> Result<CheckUsageResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!(
-                "usage/{}/{entity_type}/{entity_id}/{meter_key}/check",
-                self.app_id
-            ))
+            .join(&format!("usage/{app_id}/{entity_type}/{entity_id}/{meter_key}/check"))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -166,6 +165,7 @@ impl AetherClient {
     /// Returns an error if the HTTP request fails or Aether returns an error
     pub async fn check_entitlement(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
         feature_key: &str,
@@ -173,8 +173,7 @@ impl AetherClient {
         let url = self
             .base_url
             .join(&format!(
-                "entitlements/{}/{entity_type}/{entity_id}/{feature_key}/check",
-                self.app_id
+                "entitlements/{app_id}/{entity_type}/{entity_id}/{feature_key}/check"
             ))
             .map_err(|e| BillingError::Api {
                 status: 0,
@@ -217,12 +216,13 @@ impl AetherClient {
     /// Returns an error if the HTTP request fails or Aether returns an error
     pub async fn get_entitlements(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
     ) -> Result<EntitlementsResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!("entitlements/{}/{entity_type}/{entity_id}", self.app_id))
+            .join(&format!("entitlements/{app_id}/{entity_type}/{entity_id}"))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -264,13 +264,14 @@ impl AetherClient {
     /// Returns an error if the HTTP request fails or Aether returns an error
     pub async fn check_credits(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
         amount: f64,
     ) -> Result<CreditCheckResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!("credits/{}/{entity_type}/{entity_id}/check", self.app_id))
+            .join(&format!("credits/{app_id}/{entity_type}/{entity_id}/check"))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -313,13 +314,14 @@ impl AetherClient {
     /// Returns an error if the HTTP request fails or Aether returns an error
     pub async fn deduct_credits(
         &self,
+        app_id: &str,
         entity_type: &str,
         entity_id: &str,
         request: &CreditDeductRequest,
     ) -> Result<CreditDeductResponse, BillingError> {
         let url = self
             .base_url
-            .join(&format!("credits/{}/{entity_type}/{entity_id}/deduct", self.app_id))
+            .join(&format!("credits/{app_id}/{entity_type}/{entity_id}/deduct"))
             .map_err(|e| BillingError::Api {
                 status: 0,
                 message: format!("invalid URL: {e}"),
@@ -385,7 +387,6 @@ impl std::fmt::Debug for AetherClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AetherClient")
             .field("base_url", &self.base_url)
-            .field("app_id", &self.app_id)
             .finish_non_exhaustive()
     }
 }
@@ -398,12 +399,36 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_client(base_url: &str) -> AetherClient {
-        AetherClient::new(
-            Url::parse(base_url).unwrap(),
-            "test-app".to_owned(),
-            SecretString::from("test-key".to_owned()),
-        )
-        .unwrap()
+        AetherClient::new(Url::parse(base_url).unwrap(), SecretString::from("test-key".to_owned())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn per_call_app_id_scopes_the_request_path() {
+        // The app billed is a per-call parameter, not a client-wide constant, so
+        // one shared client meters different products. A call for "facet" must
+        // hit the facet app path, never a baked-in default.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/usage/facet/user/usr_fct/requests/record"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_fct",
+                "meterId": "meter_1",
+                "eventId": "evt_1"
+            })))
+            .expect(1)
+            .named("usage must route to the per-call app_id (facet)")
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let result = client
+            .record_usage("facet", "user", "usr_fct", "requests", 1.0, "idem-fct", HashMap::new())
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -424,7 +449,15 @@ mod tests {
         let client = test_client(&format!("{}/", server.uri()));
 
         let result = client
-            .record_usage("user", "usr_123", "input_tokens", 1500.0, "idem-1", HashMap::new())
+            .record_usage(
+                "test-app",
+                "user",
+                "usr_123",
+                "input_tokens",
+                1500.0,
+                "idem-1",
+                HashMap::new(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -448,7 +481,9 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_usage("user", "usr_123", "input_tokens", 1000.0).await;
+        let result = client
+            .check_usage("test-app", "user", "usr_123", "input_tokens", 1000.0)
+            .await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -472,7 +507,9 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_entitlement("user", "usr_123", "api_access").await;
+        let result = client
+            .check_entitlement("test-app", "user", "usr_123", "api_access")
+            .await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -492,7 +529,9 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_entitlement("user", "usr_123", "api_access").await;
+        let result = client
+            .check_entitlement("test-app", "user", "usr_123", "api_access")
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -515,7 +554,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_credits("user", "usr_123", 10.0).await;
+        let result = client.check_credits("test-app", "user", "usr_123", 10.0).await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -539,7 +578,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_credits("user", "usr_123", 10.0).await;
+        let result = client.check_credits("test-app", "user", "usr_123", 10.0).await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -552,7 +591,7 @@ mod tests {
         // Point at a port that is not listening to simulate Aether being down
         let client = test_client("http://127.0.0.1:1/");
 
-        let result = client.check_credits("user", "usr_123", 10.0).await;
+        let result = client.check_credits("test-app", "user", "usr_123", 10.0).await;
 
         assert!(result.is_err());
         // The error should be a Request variant (network error), which is
@@ -572,7 +611,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.check_credits("user", "usr_123", 10.0).await;
+        let result = client.check_credits("test-app", "user", "usr_123", 10.0).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), BillingError::Api { status: 503, .. }));
@@ -630,7 +669,7 @@ mod tests {
 
         let client = test_client(&format!("{}/", server.uri()));
 
-        let result = client.get_entitlements("user", "usr_123").await;
+        let result = client.get_entitlements("test-app", "user", "usr_123").await;
 
         assert!(result.is_ok());
         let resp = result.unwrap();

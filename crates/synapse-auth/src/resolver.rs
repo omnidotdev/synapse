@@ -44,12 +44,41 @@ pub struct ResolvedKey {
     pub mode: KeyMode,
     /// User's plan tier
     pub plan: String,
+    /// Product this key bills against (the Aether `appId`).
+    ///
+    /// A key provisioned for a downstream product (e.g. Facet) carries that
+    /// product's app id so usage, credits, and entitlements resolve against
+    /// the product rather than the gateway's own app. Absent (a direct
+    /// Synapse customer or legacy key) the gateway falls back to its
+    /// configured default app, preserving current behavior.
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// Billing entity this key meters as.
+    ///
+    /// Lets a product delegate per-end-user billing: the key identifies which
+    /// entity in the product owns the spend. Absent, the gateway bills the
+    /// key's own `user_id` as a `user` entity.
+    #[serde(default)]
+    pub billing_entity: Option<BillingEntity>,
     /// Plan-based rate limits
     #[serde(default)]
     pub rate_limits: Option<RateLimits>,
     /// Decrypted provider keys (only for BYOK mode)
     #[serde(default)]
     pub provider_keys: Vec<ProviderKeyRef>,
+}
+
+/// Billing entity a provisioned key meters against
+///
+/// Carried on a product-scoped key so Synapse can bill the product's
+/// end-user (or workspace) rather than the key owner.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingEntity {
+    /// Entity type (e.g. "user", "workspace")
+    pub entity_type: String,
+    /// Entity identifier within the product
+    pub entity_id: String,
 }
 
 /// API key billing mode
