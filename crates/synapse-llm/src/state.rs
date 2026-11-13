@@ -100,12 +100,10 @@ impl LlmState {
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
-        // Pre-request credit check for managed billing
+        // Pre-request credit check for managed billing, priced on the resolved
+        // model (a managed request for an unpriced model is refused here)
         #[cfg(feature = "billing")]
-        let estimated_cost = self.estimate_request_cost(&context, &provider_name, &request);
-
-        #[cfg(feature = "billing")]
-        if let Some(cost) = estimated_cost {
+        if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
             self.check_credits(&context, cost).await?;
         }
 
@@ -209,12 +207,10 @@ impl LlmState {
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
-        // Pre-request credit check for managed billing
+        // Pre-request credit check for managed billing, priced on the resolved
+        // model (a managed request for an unpriced model is refused here)
         #[cfg(feature = "billing")]
-        let estimated_cost = self.estimate_request_cost(&context, &provider_name, &request);
-
-        #[cfg(feature = "billing")]
-        if let Some(cost) = estimated_cost {
+        if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
             self.check_credits(&context, cost).await?;
         }
 
@@ -1166,20 +1162,47 @@ impl LlmState {
     }
 }
 
+/// Price a managed request on the model that will actually serve it
+///
+/// `model_id` is the resolved, bare model id the registry is keyed by, never
+/// the raw request id (`anthropic/...` or a virtual model like `auto`), which
+/// never matches and used to price every such request at $0. A model with no
+/// price profile is refused: serving it on Omni's key would bill nothing
+#[cfg(feature = "billing")]
+fn managed_cost(
+    registry: &ModelRegistry,
+    provider_name: &str,
+    model_id: &str,
+    input_tokens: usize,
+    output_tokens: usize,
+    margin: f64,
+) -> Result<f64, LlmError> {
+    registry
+        .find(provider_name, model_id)
+        .map(|profile| profile.estimate_cost(input_tokens, output_tokens) * margin)
+        .ok_or_else(|| LlmError::ModelNotPriced {
+            model: format!("{provider_name}/{model_id}"),
+        })
+}
+
 /// Estimate the cost of a request based on input tokens
 ///
-/// Returns `None` if the user is not in managed billing mode
+/// Returns `Ok(None)` if the user is not in managed billing mode, and an
+/// error if a managed request names a model the gateway cannot price
 #[cfg(feature = "billing")]
 impl LlmState {
     fn estimate_request_cost(
         &self,
         context: &RequestContext,
         provider_name: &str,
+        model_id: &str,
         request: &CompletionRequest,
-    ) -> Option<f64> {
-        let identity = context.billing_identity.as_ref()?;
+    ) -> Result<Option<f64>, LlmError> {
+        let Some(identity) = context.billing_identity.as_ref() else {
+            return Ok(None);
+        };
         if identity.mode != synapse_core::BillingMode::Managed {
-            return None;
+            return Ok(None);
         }
 
         // Estimate input tokens from message content
@@ -1193,22 +1216,22 @@ impl LlmState {
             .extensions
             .get::<synapse_auth::ResolvedKey>()
             .map(|r| r.plan.as_str());
-        let cost = self
-            .inner
-            .model_registry
-            .find(provider_name, &request.model)
-            .map_or(0.0, |profile| {
-                let base = profile.estimate_cost(estimated_input, estimated_output);
-                let margin = resolve_margin(
-                    plan,
-                    &self.inner.tier_margins,
-                    &self.inner.managed_margins,
-                    provider_name,
-                );
-                base * margin
-            });
+        let margin = resolve_margin(
+            plan,
+            &self.inner.tier_margins,
+            &self.inner.managed_margins,
+            provider_name,
+        );
 
-        if cost > 0.0 { Some(cost) } else { None }
+        managed_cost(
+            &self.inner.model_registry,
+            provider_name,
+            model_id,
+            estimated_input,
+            estimated_output,
+            margin,
+        )
+        .map(Some)
     }
 
     /// Check if the user has sufficient credits for the estimated cost
@@ -1581,5 +1604,80 @@ mod tests {
         // Falls back to 1.0 when nothing matches
         let m = resolve_margin(None, &tier_margins, &managed_margins, "unknown");
         assert!((m - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "billing")]
+    fn priced_registry() -> ModelRegistry {
+        ModelRegistry::from_config(&[synapse_config::ModelProfileConfig {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            context_window: 200_000,
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            quality: 0.9,
+            capabilities: synapse_config::ModelCapabilities::default(),
+        }])
+    }
+
+    #[cfg(feature = "billing")]
+    #[test]
+    fn managed_cost_prices_the_resolved_model_with_margin() {
+        let registry = priced_registry();
+
+        // 1M input at $3 + 1M output at $15, times a 2.0 margin
+        let cost = managed_cost(
+            &registry,
+            "anthropic",
+            "claude-sonnet-4-5-20250929",
+            1_000_000,
+            1_000_000,
+            2.0,
+        );
+
+        assert!(cost.is_ok_and(|c| (c - 36.0).abs() < 1e-9));
+    }
+
+    #[cfg(feature = "billing")]
+    #[test]
+    fn managed_cost_rejects_an_unpriced_model() {
+        // Serving a model the gateway cannot price would bill it at $0, so a
+        // managed request for one must be refused before reaching the provider
+        let registry = priced_registry();
+
+        let cost = managed_cost(&registry, "anthropic", "claude-opus-5-5", 1_000, 1_000, 2.0);
+
+        assert!(matches!(cost, Err(LlmError::ModelNotPriced { .. })));
+    }
+
+    #[cfg(feature = "billing")]
+    #[test]
+    fn managed_cost_does_not_match_a_provider_prefixed_id() {
+        // The registry keys bare model ids; callers must pass the resolved id,
+        // never the raw request id (`anthropic/...`), which used to price at $0
+        let registry = priced_registry();
+
+        let cost = managed_cost(
+            &registry,
+            "anthropic",
+            "anthropic/claude-sonnet-4-5-20250929",
+            1_000,
+            1_000,
+            1.0,
+        );
+
+        assert!(cost.is_err());
+    }
+
+    #[test]
+    fn model_not_priced_is_a_client_error_and_never_retried() {
+        use synapse_core::HttpError;
+
+        let err = LlmError::ModelNotPriced {
+            model: "anthropic/claude-opus-5-5".to_owned(),
+        };
+
+        assert_eq!(err.status_code(), http::StatusCode::BAD_REQUEST);
+        assert!(!err.is_retryable());
+        assert!(err.client_message().contains("bring your own"));
     }
 }
