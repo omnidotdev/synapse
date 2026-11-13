@@ -244,6 +244,13 @@ free = 1.15
 pro = 1.15
 team = 1.15
 
+# Margin for product-scoped keys (other Omni products billing through this
+# gateway). Tier margins above apply only to Synapse's own plans. Products not
+# listed here use default_product_margin (2.0, the fleet retail markup)
+[billing.product_margins]
+facet = 2.0
+keystone = 2.0
+
 [billing.managed_providers.openai]
 api_key = "{{ env.OPENAI_API_KEY }}"
 margin = 1.0

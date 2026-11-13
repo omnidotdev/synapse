@@ -28,6 +28,12 @@ pub struct EntitlementChangePayload {
     pub entity_type: String,
     /// Entity ID
     pub entity_id: String,
+    /// Product whose entitlement changed (the Aether `appId`), if known.
+    ///
+    /// Absent, the change is applied to the entity in every product so a
+    /// sender that does not name the product never leaves a stale grant
+    #[serde(default, alias = "product_id")]
+    pub app_id: Option<String>,
     /// Specific feature key that changed, if any
     pub feature_key: Option<String>,
 }
@@ -49,14 +55,19 @@ pub async fn entitlement_webhook_handler(
         return StatusCode::UNAUTHORIZED;
     }
 
+    let app_id = body.app_id.as_deref();
+
     if let Some(ref feature_key) = body.feature_key {
         // Invalidate specific entitlement
         state
             .cache
-            .invalidate_entitlement(&body.entity_type, &body.entity_id, feature_key);
+            .invalidate_entitlement(app_id, &body.entity_type, &body.entity_id, feature_key);
         // Token limits depend on entitlement values, so always invalidate them
-        state.cache.invalidate_token_limits(&body.entity_type, &body.entity_id);
+        state
+            .cache
+            .invalidate_token_limits(app_id, &body.entity_type, &body.entity_id);
         tracing::debug!(
+            app_id = ?app_id,
             entity_type = %body.entity_type,
             entity_id = %body.entity_id,
             feature_key = %feature_key,
@@ -67,13 +78,18 @@ pub async fn entitlement_webhook_handler(
         for key in state.billing_config.all_feature_keys() {
             state
                 .cache
-                .invalidate_entitlement(&body.entity_type, &body.entity_id, key);
+                .invalidate_entitlement(app_id, &body.entity_type, &body.entity_id, key);
         }
         for key in state.billing_config.all_meter_keys() {
-            state.cache.invalidate_usage(&body.entity_type, &body.entity_id, key);
+            state
+                .cache
+                .invalidate_usage(app_id, &body.entity_type, &body.entity_id, key);
         }
-        state.cache.invalidate_token_limits(&body.entity_type, &body.entity_id);
+        state
+            .cache
+            .invalidate_token_limits(app_id, &body.entity_type, &body.entity_id);
         tracing::debug!(
+            app_id = ?app_id,
             entity_type = %body.entity_type,
             entity_id = %body.entity_id,
             "invalidated all cached entitlements, usage meters, and token limits"
@@ -101,5 +117,20 @@ mod tests {
         let json = r#"{"entity_type":"user","entity_id":"usr_123"}"#;
         let payload: EntitlementChangePayload = serde_json::from_str(json).unwrap();
         assert!(payload.feature_key.is_none());
+        assert!(payload.app_id.is_none());
+    }
+
+    #[test]
+    fn deserialize_payload_with_product() {
+        let json = r#"{"entity_type":"user","entity_id":"usr_123","app_id":"facet"}"#;
+        let payload: EntitlementChangePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.app_id.as_deref(), Some("facet"));
+    }
+
+    #[test]
+    fn deserialize_payload_with_product_id_alias() {
+        let json = r#"{"entity_type":"user","entity_id":"usr_123","product_id":"facet"}"#;
+        let payload: EntitlementChangePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.app_id.as_deref(), Some("facet"));
     }
 }

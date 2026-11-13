@@ -8,7 +8,7 @@ use synapse_billing::AetherClient;
 use synapse_config::{BillingConfig, FailMode};
 use synapse_core::{BillingIdentity, TokenLimits};
 
-use crate::entitlement_cache::{CachedEntitlement, CachedTokenLimits, CachedUsageCheck, EntitlementCache};
+use crate::entitlement_cache::{CachedEntitlement, CachedTokenLimits, CachedUsageCheck, EntitlementCache, Scope};
 
 /// Shared state for the entitlement middleware
 #[derive(Clone)]
@@ -51,12 +51,11 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
         return next.run(request).await;
     };
 
-    let entity_type = &identity.entity_type;
-    let entity_id = &identity.entity_id;
+    let scope = Scope::of(identity);
     let path = request.uri().path().to_owned();
 
     // 1. Check api_access entitlement
-    match check_entitlement(&state, entity_type, entity_id, &state.config.api_access_feature_key).await {
+    match check_entitlement(&state, &scope, &state.config.api_access_feature_key).await {
         Ok(true) => {}
         Ok(false) => {
             let err = synapse_billing::BillingError::EntitlementDenied {
@@ -71,7 +70,7 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
 
     // 2. Check modality entitlement if the route requires one
     if let Some(feature_key) = state.config.modality_feature_key(&path) {
-        match check_entitlement(&state, entity_type, entity_id, feature_key).await {
+        match check_entitlement(&state, &scope, feature_key).await {
             Ok(true) => {}
             Ok(false) => {
                 let err = synapse_billing::BillingError::EntitlementDenied {
@@ -86,7 +85,7 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
     }
 
     // 3. Check requests usage limit
-    match check_usage(&state, entity_type, entity_id, &state.config.meters.requests, 1.0).await {
+    match check_usage(&state, &scope, &state.config.meters.requests, 1.0).await {
         Ok(true) => {}
         Ok(false) => {
             let err = synapse_billing::BillingError::UsageLimitExceeded {
@@ -102,7 +101,7 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
     // 4. Check input tokens usage limit
     // Uses 0.0 because we can't predict token count pre-request; a user who
     // exceeds their limit mid-request gets blocked on the next request
-    match check_usage(&state, entity_type, entity_id, &state.config.meters.input_tokens, 0.0).await {
+    match check_usage(&state, &scope, &state.config.meters.input_tokens, 0.0).await {
         Ok(true) => {}
         Ok(false) => {
             let err = synapse_billing::BillingError::UsageLimitExceeded {
@@ -116,7 +115,7 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
     }
 
     // 5. Check output tokens usage limit
-    match check_usage(&state, entity_type, entity_id, &state.config.meters.output_tokens, 0.0).await {
+    match check_usage(&state, &scope, &state.config.meters.output_tokens, 0.0).await {
         Ok(true) => {}
         Ok(false) => {
             let err = synapse_billing::BillingError::UsageLimitExceeded {
@@ -131,7 +130,7 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
 
     // 6. Resolve per-request token limits from entitlements so that the
     //    guardrails middleware can enforce tier-specific caps
-    let token_limits = resolve_token_limits(&state, entity_type, entity_id).await;
+    let token_limits = resolve_token_limits(&state, &scope).await;
     request.extensions_mut().insert(token_limits);
 
     next.run(request).await
@@ -140,27 +139,25 @@ pub async fn entitlement_middleware(state: EntitlementState, mut request: Reques
 /// Check an entitlement by feature key, using cache when available
 async fn check_entitlement(
     state: &EntitlementState,
-    entity_type: &str,
-    entity_id: &str,
+    scope: &Scope<'_>,
     feature_key: &str,
 ) -> Result<bool, synapse_billing::BillingError> {
     // Check cache first
-    if let Some(cached) = state.cache.get_entitlement(entity_type, entity_id, feature_key) {
+    if let Some(cached) = state.cache.get_entitlement(scope, feature_key) {
         return Ok(cached.has_access);
     }
 
     // Cache miss, call Aether
     let response = state
         .client
-        .check_entitlement(entity_type, entity_id, feature_key)
+        .check_entitlement(scope.app_id, scope.entity_type, scope.entity_id, feature_key)
         .await?;
 
     // Only cache positive results so plan upgrades take effect immediately
     // rather than being blocked for up to cache TTL seconds
     if response.has_access {
         state.cache.put_entitlement(
-            entity_type,
-            entity_id,
+            scope,
             feature_key,
             CachedEntitlement {
                 has_access: true,
@@ -175,28 +172,32 @@ async fn check_entitlement(
 /// Check a usage meter limit, using cache when available
 async fn check_usage(
     state: &EntitlementState,
-    entity_type: &str,
-    entity_id: &str,
+    scope: &Scope<'_>,
     meter_key: &str,
     additional_usage: f64,
 ) -> Result<bool, synapse_billing::BillingError> {
     // Check cache first
-    if let Some(cached) = state.cache.get_usage(entity_type, entity_id, meter_key) {
+    if let Some(cached) = state.cache.get_usage(scope, meter_key) {
         return Ok(cached.allowed);
     }
 
     // Cache miss, call Aether
     let response = state
         .client
-        .check_usage(entity_type, entity_id, meter_key, additional_usage)
+        .check_usage(
+            scope.app_id,
+            scope.entity_type,
+            scope.entity_id,
+            meter_key,
+            additional_usage,
+        )
         .await?;
 
     // Cache both positive and negative results. Positive results use the
     // full TTL; negative results use a short TTL (5s) to prevent thundering
     // herd on rate-limited users while allowing limit resets to propagate.
     state.cache.put_usage(
-        entity_type,
-        entity_id,
+        scope,
         meter_key,
         CachedUsageCheck {
             allowed: response.allowed,
@@ -227,14 +228,18 @@ fn fallback_token_limits(fail_mode: &FailMode) -> TokenLimits {
 ///
 /// Falls back to emergency/free-tier defaults (per fail mode) when Aether is
 /// unreachable or the entitlement values are missing
-async fn resolve_token_limits(state: &EntitlementState, entity_type: &str, entity_id: &str) -> TokenLimits {
+async fn resolve_token_limits(state: &EntitlementState, scope: &Scope<'_>) -> TokenLimits {
     // Check cache first
-    if let Some(cached) = state.cache.get_token_limits(entity_type, entity_id) {
+    if let Some(cached) = state.cache.get_token_limits(scope) {
         return cached.limits;
     }
 
     // Fetch all entitlements from Aether
-    let limits = match state.client.get_entitlements(entity_type, entity_id).await {
+    let limits = match state
+        .client
+        .get_entitlements(scope.app_id, scope.entity_type, scope.entity_id)
+        .await
+    {
         Ok(response) => {
             let max_input = extract_usize_entitlement(&response.entitlements, MAX_INPUT_TOKENS_KEY)
                 .unwrap_or(TokenLimits::FREE_TIER.max_input_tokens);
@@ -265,7 +270,7 @@ async fn resolve_token_limits(state: &EntitlementState, entity_type: &str, entit
     // Cache the result
     state
         .cache
-        .put_token_limits(entity_type, entity_id, CachedTokenLimits { limits: limits.clone() });
+        .put_token_limits(scope, CachedTokenLimits { limits: limits.clone() });
 
     limits
 }

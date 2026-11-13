@@ -73,13 +73,18 @@ impl Server {
                 managed_keys.insert(name.clone(), provider_config.api_key.clone());
                 managed_margins.insert(name.clone(), provider_config.margin);
             }
-            llm_state.set_managed_providers(managed_keys, managed_margins);
-            llm_state.set_tier_margins(billing_config.tier_margins.clone());
+            llm_state.set_managed_keys(managed_keys);
+            llm_state.set_margin_policy(synapse_llm::MarginPolicy {
+                default_app_id: billing_config.app_id.clone(),
+                provider_margins: managed_margins,
+                tier_margins: billing_config.tier_margins.clone(),
+                product_margins: billing_config.product_margins.clone(),
+                default_product_margin: billing_config.default_product_margin,
+            });
 
             // Attach usage recorder for LLM
             let recorder_client = synapse_billing::AetherClient::new(
                 billing_config.billing_url.clone(),
-                billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
             let meter_keys = synapse_billing::MeterKeys {
@@ -94,7 +99,6 @@ impl Server {
             // Attach billing client for pre-request credit checks (LLM)
             let credit_client = synapse_billing::AetherClient::new(
                 billing_config.billing_url.clone(),
-                billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
             llm_state.set_billing_client(credit_client, billing_config.fail_mode.clone());
@@ -103,12 +107,10 @@ impl Server {
             {
                 let client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let meter_keys = synapse_billing::MeterKeys {
@@ -127,12 +129,10 @@ impl Server {
             {
                 let client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let meter_keys = synapse_billing::MeterKeys {
@@ -151,12 +151,10 @@ impl Server {
             {
                 let client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let meter_keys = synapse_billing::MeterKeys {
@@ -175,12 +173,10 @@ impl Server {
             {
                 let client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
-                    billing_config.app_id.clone(),
                     billing_config.service_api_key.clone(),
                 )?;
                 let meter_keys = synapse_billing::MeterKeys {
@@ -306,7 +302,6 @@ impl Server {
         {
             let aether_client = synapse_billing::AetherClient::new(
                 billing_config.billing_url.clone(),
-                billing_config.app_id.clone(),
                 billing_config.service_api_key.clone(),
             )?;
             let ent_state = entitlement::EntitlementState::new(aether_client, billing_config.clone());
@@ -391,12 +386,22 @@ impl Server {
 
             let public_paths = auth_config.public_paths.clone();
             let reporter = Some(usage_reporter);
+            // Default product the gateway bills against when a key is not
+            // product-scoped; empty when billing is disabled (no Aether calls).
+            let default_app_id = config
+                .billing
+                .as_ref()
+                .map(|billing_config| billing_config.app_id.clone())
+                .unwrap_or_default();
             app = app.layer(axum::middleware::from_fn(move |req, next| {
                 let resolver = resolver.clone();
                 let vault = vault_client.clone();
                 let public_paths = public_paths.clone();
                 let reporter = reporter.clone();
-                async move { auth::auth_middleware(resolver, vault, public_paths, reporter, req, next).await }
+                let default_app_id = default_app_id.clone();
+                async move {
+                    auth::auth_middleware(resolver, vault, public_paths, reporter, default_app_id, req, next).await
+                }
             }));
         }
 

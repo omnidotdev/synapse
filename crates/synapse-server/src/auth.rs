@@ -6,7 +6,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
-use synapse_auth::{ApiKeyResolver, KeyMode, UsageReporter, VaultClient};
+use synapse_auth::{ApiKeyResolver, KeyMode, ResolvedKey, UsageReporter, VaultClient};
 use synapse_core::{BillingIdentity, BillingMode};
 
 /// Vault-resolved provider keys stored as a request extension
@@ -29,6 +29,7 @@ pub async fn auth_middleware(
     vault_client: Option<Arc<VaultClient>>,
     public_paths: Vec<String>,
     usage_reporter: Option<UsageReporter>,
+    default_app_id: String,
     request: Request,
     next: Next,
 ) -> Response {
@@ -59,14 +60,7 @@ pub async fn auth_middleware(
 
     match resolver.resolve(token).await {
         Ok(result) => {
-            let billing_identity = BillingIdentity {
-                entity_type: "user".to_string(),
-                entity_id: result.user_id.clone(),
-                mode: match result.mode {
-                    KeyMode::Byok => BillingMode::Byok,
-                    KeyMode::Managed | KeyMode::Manual => BillingMode::Managed,
-                },
-            };
+            let billing_identity = resolve_billing_identity(&result, &default_app_id);
 
             let mut request = request;
 
@@ -91,6 +85,31 @@ pub async fn auth_middleware(
             tracing::warn!(error = %e, "API key authentication failed");
             (StatusCode::UNAUTHORIZED, "invalid API key").into_response()
         }
+    }
+}
+
+/// Resolve which product and entity a request bills against
+///
+/// A product-scoped key carries its own `app_id` and billing entity so
+/// usage, credits, and entitlements resolve against that product. Absent
+/// (direct Synapse customers, legacy keys) it falls back to the gateway's
+/// configured default app and the key's own user as a `user` entity,
+/// preserving single-product behavior
+fn resolve_billing_identity(result: &ResolvedKey, default_app_id: &str) -> BillingIdentity {
+    let app_id = result.app_id.clone().unwrap_or_else(|| default_app_id.to_owned());
+    let (entity_type, entity_id) = result.billing_entity.as_ref().map_or_else(
+        || ("user".to_owned(), result.user_id.clone()),
+        |entity| (entity.entity_type.clone(), entity.entity_id.clone()),
+    );
+
+    BillingIdentity {
+        app_id,
+        entity_type,
+        entity_id,
+        mode: match result.mode {
+            KeyMode::Byok => BillingMode::Byok,
+            KeyMode::Managed | KeyMode::Manual => BillingMode::Managed,
+        },
     }
 }
 
@@ -130,4 +149,71 @@ async fn resolve_vault_keys(
     }
 
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a resolved key from the synapse-api wire shape so the tests also
+    /// pin the camelCase contract (`appId`, `billingEntity`)
+    fn key(json: serde_json::Value) -> ResolvedKey {
+        serde_json::from_value(json).expect("valid resolved key")
+    }
+
+    #[test]
+    fn product_scoped_key_bills_its_product_and_entity() {
+        let resolved = key(serde_json::json!({
+            "userId": "usr_owner",
+            "workspaceId": null,
+            "apiKeyId": "key_1",
+            "mode": "managed",
+            "plan": "free",
+            "appId": "facet",
+            "billingEntity": { "entityType": "user", "entityId": "usr_end" }
+        }));
+
+        let identity = resolve_billing_identity(&resolved, "synapse");
+
+        assert_eq!(identity.app_id, "facet");
+        assert_eq!(identity.entity_type, "user");
+        assert_eq!(identity.entity_id, "usr_end");
+        assert_eq!(identity.mode, BillingMode::Managed);
+    }
+
+    #[test]
+    fn legacy_key_falls_back_to_default_app_and_owner() {
+        let resolved = key(serde_json::json!({
+            "userId": "usr_owner",
+            "workspaceId": null,
+            "apiKeyId": "key_2",
+            "mode": "byok",
+            "plan": "pro"
+        }));
+
+        let identity = resolve_billing_identity(&resolved, "synapse");
+
+        assert_eq!(identity.app_id, "synapse");
+        assert_eq!(identity.entity_type, "user");
+        assert_eq!(identity.entity_id, "usr_owner");
+        assert_eq!(identity.mode, BillingMode::Byok);
+    }
+
+    #[test]
+    fn app_id_without_entity_bills_owner_under_product() {
+        let resolved = key(serde_json::json!({
+            "userId": "usr_owner",
+            "workspaceId": null,
+            "apiKeyId": "key_3",
+            "mode": "manual",
+            "plan": "team",
+            "appId": "keystone"
+        }));
+
+        let identity = resolve_billing_identity(&resolved, "synapse");
+
+        assert_eq!(identity.app_id, "keystone");
+        assert_eq!(identity.entity_id, "usr_owner");
+        assert_eq!(identity.mode, BillingMode::Managed);
+    }
 }

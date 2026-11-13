@@ -7,6 +7,8 @@ use crate::client::AetherClient;
 /// Usage event to be recorded asynchronously
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
+    /// Product this event meters against (the Aether `appId`)
+    pub app_id: String,
     /// Entity type (e.g. "user")
     pub entity_type: String,
     /// Entity identifier (user ID from JWT sub)
@@ -109,6 +111,7 @@ async fn record_event(client: &AetherClient, meter_keys: &MeterKeys, event: &Usa
     if event.input_tokens > 0
         && let Err(e) = client
             .record_usage(
+                &event.app_id,
                 &event.entity_type,
                 &event.entity_id,
                 &meter_keys.input_tokens,
@@ -131,6 +134,7 @@ async fn record_event(client: &AetherClient, meter_keys: &MeterKeys, event: &Usa
     if event.output_tokens > 0
         && let Err(e) = client
             .record_usage(
+                &event.app_id,
                 &event.entity_type,
                 &event.entity_id,
                 &meter_keys.output_tokens,
@@ -152,6 +156,7 @@ async fn record_event(client: &AetherClient, meter_keys: &MeterKeys, event: &Usa
     // Record request count
     if let Err(e) = client
         .record_usage(
+            &event.app_id,
             &event.entity_type,
             &event.entity_id,
             &meter_keys.requests,
@@ -172,6 +177,7 @@ async fn record_event(client: &AetherClient, meter_keys: &MeterKeys, event: &Usa
     // Record message count
     if let Err(e) = client
         .record_usage(
+            &event.app_id,
             &event.entity_type,
             &event.entity_id,
             &meter_keys.messages,
@@ -217,6 +223,7 @@ mod tests {
         // BYOK events have zero tokens but must still be recorded so the
         // request count meter is incremented (recorder always records delta=1)
         let event = UsageEvent {
+            app_id: "test-app".to_owned(),
             entity_type: "user".to_owned(),
             entity_id: "usr_byok".to_owned(),
             model: "gpt-4o".to_owned(),
@@ -242,6 +249,7 @@ mod tests {
     #[test]
     fn build_metadata_includes_fields() {
         let event = UsageEvent {
+            app_id: "test-app".to_owned(),
             entity_type: "user".to_owned(),
             entity_id: "usr_1".to_owned(),
             model: "gpt-4o".to_owned(),
@@ -308,12 +316,12 @@ mod tests {
 
         let client = crate::AetherClient::new(
             url::Url::parse(&format!("{}/", server.uri())).unwrap(),
-            "test-app".to_owned(),
             secrecy::SecretString::from("test-key".to_owned()),
         )
         .unwrap();
 
         let event = UsageEvent {
+            app_id: "test-app".to_owned(),
             entity_type: "user".to_owned(),
             entity_id: "usr_byok".to_owned(),
             model: "gpt-4o".to_owned(),
@@ -372,12 +380,12 @@ mod tests {
 
         let client = crate::AetherClient::new(
             url::Url::parse(&format!("{}/", server.uri())).unwrap(),
-            "test-app".to_owned(),
             secrecy::SecretString::from("test-key".to_owned()),
         )
         .unwrap();
 
         let event = UsageEvent {
+            app_id: "test-app".to_owned(),
             entity_type: "user".to_owned(),
             entity_id: "usr_managed".to_owned(),
             model: "gpt-4o".to_owned(),

@@ -37,9 +37,20 @@ pub struct BillingConfig {
     #[serde(default = "default_entitlement_cache_ttl_secs")]
     pub entitlement_cache_ttl_secs: u64,
     /// Per-tier margin multipliers (e.g. "free" = 1.2, "pro" = 1.15)
-    /// When set, these override the per-provider margin for that tier
+    /// When set, these override the per-provider margin for that tier.
+    /// They apply only to this gateway's own product (`app_id`), since the
+    /// keys are this product's plan names
     #[serde(default)]
     pub tier_margins: HashMap<String, f64>,
+    /// Per-product margin multipliers for product-scoped keys (app id to
+    /// multiplier, e.g. "facet" = 2.0). Product-scoped traffic never uses
+    /// `tier_margins` or provider margins
+    #[serde(default)]
+    pub product_margins: HashMap<String, f64>,
+    /// Margin for product-scoped traffic whose product has no entry in
+    /// `product_margins` (the fleet retail markup)
+    #[serde(default = "default_product_margin")]
+    pub default_product_margin: f64,
     /// Behavior when Aether is unreachable
     #[serde(default)]
     pub fail_mode: FailMode,
@@ -164,6 +175,21 @@ const fn default_margin() -> f64 {
     1.0
 }
 
+const fn default_product_margin() -> f64 {
+    2.0
+}
+
+/// Reject a margin that would sell managed usage below upstream cost
+fn check_margin(label: &str, margin: f64) -> Result<(), String> {
+    if margin.is_finite() && margin >= 1.0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} must be a finite multiplier of at least 1.0, got {margin}"
+        ))
+    }
+}
+
 fn default_input_tokens_key() -> String {
     "input_tokens".to_owned()
 }
@@ -186,10 +212,20 @@ impl BillingConfig {
     /// # Errors
     ///
     /// Returns an error if managed mode is enabled but no providers are
-    /// configured
+    /// configured, or if any margin would sell managed usage below cost
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == OperatingMode::Managed && self.managed_providers.is_empty() {
             return Err("managed mode requires at least one managed provider".to_owned());
+        }
+        check_margin("billing.default_product_margin", self.default_product_margin)?;
+        for (product, margin) in &self.product_margins {
+            check_margin(&format!("billing.product_margins.{product}"), *margin)?;
+        }
+        for (tier, margin) in &self.tier_margins {
+            check_margin(&format!("billing.tier_margins.{tier}"), *margin)?;
+        }
+        for (provider, config) in &self.managed_providers {
+            check_margin(&format!("billing.managed_providers.{provider}.margin"), config.margin)?;
         }
         Ok(())
     }
@@ -589,5 +625,71 @@ mod tests {
 
         let config: BillingConfig = toml::from_str(toml).unwrap();
         assert!(config.tier_margins.is_empty());
+    }
+
+    const BASE: &str = r#"
+        enabled = true
+        billing_url = "https://billing.omni.dev/"
+        service_api_key = "sk-test-123"
+        app_id = "synapse"
+    "#;
+
+    fn parse(extra: &str) -> BillingConfig {
+        toml::from_str(&format!("{BASE}\n{extra}")).unwrap()
+    }
+
+    #[test]
+    fn product_margins_default_to_retail_markup() {
+        let config = parse("");
+        assert!(config.product_margins.is_empty());
+        assert!((config.default_product_margin - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn deserialize_product_margins() {
+        let config = parse(
+            r"
+            default_product_margin = 1.8
+
+            [product_margins]
+            facet = 2.0
+            keystone = 2.5
+            ",
+        );
+        assert!((config.product_margins["facet"] - 2.0).abs() < f64::EPSILON);
+        assert!((config.product_margins["keystone"] - 2.5).abs() < f64::EPSILON);
+        assert!((config.default_product_margin - 1.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn validate_rejects_any_margin_below_cost() {
+        let below_cost = [
+            "default_product_margin = 0.99",
+            "[product_margins]\nfacet = 0.5",
+            "[tier_margins]\npro = 0.9",
+            "[managed_providers.openai]\napi_key = \"sk\"\nmargin = 0.8",
+            "[product_margins]\nfacet = nan",
+        ];
+        for extra in below_cost {
+            assert!(parse(extra).validate().is_err(), "accepted: {extra}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_margins_at_or_above_cost() {
+        let config = parse(
+            r#"
+            [tier_margins]
+            free = 1.15
+
+            [product_margins]
+            facet = 2.0
+
+            [managed_providers.openai]
+            api_key = "sk"
+            margin = 1.0
+            "#,
+        );
+        assert!(config.validate().is_ok());
     }
 }

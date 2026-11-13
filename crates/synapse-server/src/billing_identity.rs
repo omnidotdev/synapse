@@ -39,7 +39,10 @@ pub async fn billing_identity_middleware(config: BillingConfig, request: Request
     let has_provider_key = request.headers().contains_key(PROVIDER_KEY_HEADER);
     let mode = resolve_billing_mode(&config.mode, has_provider_key);
 
+    // JWT-authenticated requests are Synapse's own direct customers, so they
+    // bill against the gateway's configured app.
     let identity = BillingIdentity {
+        app_id: config.app_id.clone(),
         entity_type: config.entity_type.clone(),
         entity_id: subject.clone(),
         mode,
