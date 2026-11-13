@@ -14,6 +14,7 @@ use synapse_routing::{FeedbackTracker, ModelRegistry, RequestFeedback, StrategyR
 use crate::discovery;
 use crate::error::LlmError;
 use crate::health::ProviderHealthTracker;
+use crate::margin::MarginPolicy;
 use crate::provider::Provider;
 use crate::routing::ModelRouter;
 use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
@@ -38,10 +39,8 @@ pub(crate) struct LlmStateInner {
     pub(crate) feedback: FeedbackTracker,
     /// Managed provider keys (provider name → API key) for managed billing mode
     pub(crate) managed_keys: HashMap<String, SecretString>,
-    /// Managed provider margins (provider name → margin multiplier)
-    pub(crate) managed_margins: HashMap<String, f64>,
-    /// Per-tier margin multipliers (plan name → margin multiplier)
-    pub(crate) tier_margins: HashMap<String, f64>,
+    /// Markup applied to upstream cost for managed usage
+    pub(crate) margins: MarginPolicy,
     /// Usage recorder for billing metering (billing feature only)
     #[cfg(feature = "billing")]
     pub(crate) usage_recorder: Option<synapse_billing::UsageRecorder>,
@@ -131,8 +130,7 @@ impl LlmState {
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 &self.inner.model_registry,
-                &self.inner.managed_margins,
-                &self.inner.tier_margins,
+                &self.inner.margins,
             );
         }
 
@@ -158,8 +156,7 @@ impl LlmState {
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 &self.inner.model_registry,
-                &self.inner.managed_margins,
-                &self.inner.tier_margins,
+                &self.inner.margins,
             );
         }
 
@@ -260,8 +257,7 @@ impl LlmState {
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         &inner.model_registry,
-                        &inner.managed_margins,
-                        &inner.tier_margins,
+                        &inner.margins,
                     );
 
                     // Deduct credits for actual usage (fire-and-forget)
@@ -274,8 +270,7 @@ impl LlmState {
                             usage.prompt_tokens,
                             usage.completion_tokens,
                             &inner.model_registry,
-                            &inner.managed_margins,
-                            &inner.tier_margins,
+                            &inner.margins,
                         );
                     }
 
@@ -291,8 +286,7 @@ impl LlmState {
                             usage.prompt_tokens,
                             usage.completion_tokens,
                             &inner.model_registry,
-                            &inner.managed_margins,
-                            &inner.tier_margins,
+                            &inner.margins,
                         );
                     }
                 }
@@ -318,8 +312,7 @@ impl LlmState {
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         &inner.model_registry,
-                        &inner.managed_margins,
-                        &inner.tier_margins,
+                        &inner.margins,
                     );
                 }
                 item
@@ -383,8 +376,7 @@ impl LlmState {
                 strategy_registry,
                 feedback,
                 managed_keys: HashMap::new(),
-                managed_margins: HashMap::new(),
-                tier_margins: HashMap::new(),
+                margins: MarginPolicy::default(),
                 #[cfg(feature = "billing")]
                 usage_recorder: None,
                 #[cfg(feature = "billing")]
@@ -404,25 +396,21 @@ impl LlmState {
     /// # Panics
     ///
     /// Panics if called after the inner `Arc` has been cloned
-    pub fn set_managed_providers(&mut self, keys: HashMap<String, SecretString>, margins: HashMap<String, f64>) {
-        let inner = Arc::get_mut(&mut self.inner).expect("set_managed_providers must be called before state is shared");
+    pub fn set_managed_keys(&mut self, keys: HashMap<String, SecretString>) {
+        let inner = Arc::get_mut(&mut self.inner).expect("set_managed_keys must be called before state is shared");
         inner.managed_keys = keys;
-        inner.managed_margins = margins;
     }
 
-    /// Configure per-tier margin multipliers for billing
-    ///
-    /// Tier margins take precedence over per-provider margins when the
-    /// user's plan matches a configured tier.
+    /// Configure the markup applied to managed usage
     ///
     /// Must be called before the state is shared with handlers.
     ///
     /// # Panics
     ///
     /// Panics if called after the inner `Arc` has been cloned
-    pub fn set_tier_margins(&mut self, tier_margins: HashMap<String, f64>) {
-        let inner = Arc::get_mut(&mut self.inner).expect("set_tier_margins must be called before state is shared");
-        inner.tier_margins = tier_margins;
+    pub fn set_margin_policy(&mut self, margins: MarginPolicy) {
+        let inner = Arc::get_mut(&mut self.inner).expect("set_margin_policy must be called before state is shared");
+        inner.margins = margins;
     }
 
     /// Attach a usage recorder for billing metering
@@ -1221,12 +1209,7 @@ impl LlmState {
             .extensions
             .get::<synapse_auth::ResolvedKey>()
             .map(|r| r.plan.as_str());
-        let margin = resolve_margin(
-            plan,
-            &self.inner.tier_margins,
-            &self.inner.managed_margins,
-            provider_name,
-        );
+        let margin = self.inner.margins.resolve(Some(&identity.app_id), plan, provider_name);
 
         managed_cost(
             &self.inner.model_registry,
@@ -1330,12 +1313,7 @@ impl LlmState {
             .find(provider_name, model_id)
             .map_or(0.0, |profile| {
                 let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-                let margin = resolve_margin(
-                    plan,
-                    &self.inner.tier_margins,
-                    &self.inner.managed_margins,
-                    provider_name,
-                );
+                let margin = self.inner.margins.resolve(Some(&identity.app_id), plan, provider_name);
                 base * margin
             });
 
@@ -1376,8 +1354,7 @@ fn spawn_credit_deduction(
     input_tokens: u32,
     output_tokens: u32,
     model_registry: &ModelRegistry,
-    managed_margins: &HashMap<String, f64>,
-    tier_margins: &HashMap<String, f64>,
+    margins: &MarginPolicy,
 ) {
     let Some(ref identity) = context.billing_identity else {
         return;
@@ -1394,7 +1371,7 @@ fn spawn_credit_deduction(
         .map(|r| r.plan.as_str());
     let actual_cost = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
         let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-        let margin = resolve_margin(plan, tier_margins, managed_margins, provider_name);
+        let margin = margins.resolve(Some(&identity.app_id), plan, provider_name);
         base * margin
     });
 
@@ -1438,8 +1415,7 @@ fn dispatch_usage_event(
     input_tokens: u32,
     output_tokens: u32,
     model_registry: &ModelRegistry,
-    managed_margins: &HashMap<String, f64>,
-    tier_margins: &HashMap<String, f64>,
+    margins: &MarginPolicy,
 ) {
     let Some(ref identity) = context.billing_identity else {
         return;
@@ -1461,7 +1437,7 @@ fn dispatch_usage_event(
             .map(|r| r.plan.as_str());
         model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
             let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-            let margin = resolve_margin(plan, tier_margins, managed_margins, provider_name);
+            let margin = margins.resolve(Some(&identity.app_id), plan, provider_name);
             base * margin
         })
     };
@@ -1490,8 +1466,7 @@ fn dispatch_usage_report(
     input_tokens: u32,
     output_tokens: u32,
     model_registry: &ModelRegistry,
-    managed_margins: &HashMap<String, f64>,
-    tier_margins: &HashMap<String, f64>,
+    margins: &MarginPolicy,
 ) {
     let Some(reporter) = context.parts.extensions.get::<synapse_auth::UsageReporter>() else {
         return;
@@ -1509,8 +1484,7 @@ fn dispatch_usage_report(
         input_tokens,
         output_tokens,
         model_registry,
-        managed_margins,
-        tier_margins,
+        margins,
     );
 }
 
@@ -1524,12 +1498,11 @@ fn record_usage_report(
     input_tokens: u32,
     output_tokens: u32,
     model_registry: &ModelRegistry,
-    managed_margins: &HashMap<String, f64>,
-    tier_margins: &HashMap<String, f64>,
+    margins: &MarginPolicy,
 ) {
     let estimated_cost_usd = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
         let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-        let margin = resolve_margin(Some(&resolved.plan), tier_margins, managed_margins, provider_name);
+        let margin = margins.resolve(resolved.app_id.as_deref(), Some(&resolved.plan), provider_name);
         base * margin
     });
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1557,21 +1530,6 @@ fn record_usage_report(
     });
 }
 
-/// Resolve the effective margin for a request
-///
-/// Tier margin takes precedence over provider margin when the user's plan
-/// matches a configured tier.
-fn resolve_margin(
-    plan: Option<&str>,
-    tier_margins: &HashMap<String, f64>,
-    managed_margins: &HashMap<String, f64>,
-    provider_name: &str,
-) -> f64 {
-    plan.and_then(|p| tier_margins.get(p).copied())
-        .or_else(|| managed_margins.get(provider_name).copied())
-        .unwrap_or(1.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1590,32 +1548,6 @@ mod tests {
         fn _assert_stream(state: &LlmState, req: CompletionRequest, ctx: RequestContext) {
             let _fut = state.complete_stream(req, ctx);
         }
-    }
-
-    #[test]
-    fn resolve_margin_tier_takes_precedence() {
-        let mut tier_margins = HashMap::new();
-        tier_margins.insert("free".to_owned(), 1.2);
-        tier_margins.insert("pro".to_owned(), 1.15);
-
-        let mut managed_margins = HashMap::new();
-        managed_margins.insert("openai".to_owned(), 1.3);
-
-        // Tier margin wins when plan matches
-        let m = resolve_margin(Some("free"), &tier_margins, &managed_margins, "openai");
-        assert!((m - 1.2).abs() < f64::EPSILON);
-
-        // Falls back to provider margin when plan has no tier margin
-        let m = resolve_margin(Some("enterprise"), &tier_margins, &managed_margins, "openai");
-        assert!((m - 1.3).abs() < f64::EPSILON);
-
-        // Falls back to provider margin when no plan
-        let m = resolve_margin(None, &tier_margins, &managed_margins, "openai");
-        assert!((m - 1.3).abs() < f64::EPSILON);
-
-        // Falls back to 1.0 when nothing matches
-        let m = resolve_margin(None, &tier_margins, &managed_margins, "unknown");
-        assert!((m - 1.0).abs() < f64::EPSILON);
     }
 
     #[cfg(feature = "billing")]

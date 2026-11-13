@@ -73,8 +73,14 @@ impl Server {
                 managed_keys.insert(name.clone(), provider_config.api_key.clone());
                 managed_margins.insert(name.clone(), provider_config.margin);
             }
-            llm_state.set_managed_providers(managed_keys, managed_margins);
-            llm_state.set_tier_margins(billing_config.tier_margins.clone());
+            llm_state.set_managed_keys(managed_keys);
+            llm_state.set_margin_policy(synapse_llm::MarginPolicy {
+                default_app_id: billing_config.app_id.clone(),
+                provider_margins: managed_margins,
+                tier_margins: billing_config.tier_margins.clone(),
+                product_margins: billing_config.product_margins.clone(),
+                default_product_margin: billing_config.default_product_margin,
+            });
 
             // Attach usage recorder for LLM
             let recorder_client = synapse_billing::AetherClient::new(

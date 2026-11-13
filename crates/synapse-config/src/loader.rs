@@ -39,6 +39,9 @@ impl Config {
         self.validate_llm_config()?;
         self.validate_mcp_config()?;
         self.validate_auth_config()?;
+        if let Some(ref billing) = self.billing {
+            billing.validate().map_err(anyhow::Error::msg)?;
+        }
         Ok(())
     }
 
@@ -120,5 +123,35 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Config;
+
+    fn config_with_billing(billing: &str) -> Config {
+        let toml = format!(
+            r#"
+            [llm.providers.openai]
+            type = "openai"
+            api_key = "sk-test"
+
+            [billing]
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            {billing}
+            "#
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    #[test]
+    fn validate_checks_billing_config() {
+        assert!(config_with_billing("").validate().is_ok());
+        assert!(config_with_billing("default_product_margin = 0.5").validate().is_err());
+        assert!(config_with_billing(r#"mode = "managed""#).validate().is_err());
     }
 }

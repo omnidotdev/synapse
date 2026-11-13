@@ -12,6 +12,7 @@ pub mod error;
 #[cfg(feature = "http")]
 pub mod handler;
 pub mod health;
+pub mod margin;
 pub mod protocol;
 pub mod provider;
 pub mod routing;
@@ -21,6 +22,7 @@ pub mod types;
 pub use error::LlmError;
 #[cfg(feature = "http")]
 pub use handler::llm_router;
+pub use margin::{DEFAULT_PRODUCT_MARGIN, MarginPolicy};
 pub use provider::{Provider, ProviderCapabilities};
 pub use routing::{ModelRouter, ResolvedModel};
 pub use state::LlmState;
