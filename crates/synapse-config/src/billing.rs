@@ -648,13 +648,13 @@ mod tests {
     #[test]
     fn deserialize_product_margins() {
         let config = parse(
-            r#"
+            r"
             default_product_margin = 1.8
 
             [product_margins]
             facet = 2.0
             keystone = 2.5
-            "#,
+            ",
         );
         assert!((config.product_margins["facet"] - 2.0).abs() < f64::EPSILON);
         assert!((config.product_margins["keystone"] - 2.5).abs() < f64::EPSILON);
