@@ -64,6 +64,7 @@ mod tests {
             output_per_mtok: 2.0,
             quality: 0.90,
             capabilities: ModelCapabilities::default(),
+            long_context_pricing: None,
         }]);
         registry.profiles()[0].clone()
     }

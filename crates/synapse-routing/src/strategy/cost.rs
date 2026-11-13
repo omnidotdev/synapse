@@ -110,6 +110,7 @@ mod tests {
                 output_per_mtok: 30.0,
                 quality: 0.95,
                 capabilities: ModelCapabilities::default(),
+                long_context_pricing: None,
             },
             ModelProfileConfig {
                 provider: "cheap".to_owned(),
@@ -119,6 +120,7 @@ mod tests {
                 output_per_mtok: 0.3,
                 quality: 0.70,
                 capabilities: ModelCapabilities::default(),
+                long_context_pricing: None,
             },
         ])
     }

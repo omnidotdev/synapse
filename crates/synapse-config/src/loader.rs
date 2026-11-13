@@ -75,6 +75,15 @@ impl Config {
             }
         }
 
+        // Models served with managed keys must be priced, or they bill $0
+        if let Some(billing) = self.billing.as_ref().filter(|b| b.enabled) {
+            for profile in &self.llm.routing.models {
+                if billing.managed_providers.contains_key(&profile.provider) {
+                    profile.check_billable_price().map_err(anyhow::Error::msg)?;
+                }
+            }
+        }
+
         // Validate token rate limits require client identification
         if let Some(ref rate_limit) = self.server.rate_limit
             && rate_limit.tokens.is_some()

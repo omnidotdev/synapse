@@ -271,6 +271,49 @@ pub struct ModelProfileConfig {
     /// Model capabilities
     #[serde(default)]
     pub capabilities: ModelCapabilities,
+    /// Higher rate the provider charges once a prompt is long
+    #[serde(default)]
+    pub long_context_pricing: Option<LongContextPricing>,
+}
+
+impl ModelProfileConfig {
+    /// Check the profile carries a real price, so managed usage is never
+    /// billed at $0 (an omitted price deserializes to 0)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a price is not positive, or a long-context tier
+    /// is cheaper than the base rate
+    pub fn check_billable_price(&self) -> Result<(), String> {
+        let id = format!("{}/{}", self.provider, self.model);
+        let positive = |rate: f64| rate.is_finite() && rate > 0.0;
+        if !positive(self.input_per_mtok) || !positive(self.output_per_mtok) {
+            return Err(format!(
+                "model {id} is served with managed keys but has no input/output price"
+            ));
+        }
+        let at_least = |rate: f64, base: f64| rate.is_finite() && rate >= base;
+        if let Some(tier) = &self.long_context_pricing
+            && (!at_least(tier.input_per_mtok, self.input_per_mtok)
+                || !at_least(tier.output_per_mtok, self.output_per_mtok))
+        {
+            return Err(format!("model {id} has a long-context price below its base price"));
+        }
+        Ok(())
+    }
+}
+
+/// Pricing tier a provider applies to a whole request once its prompt
+/// exceeds a token threshold
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LongContextPricing {
+    /// Input token count above which the tier applies
+    pub above_input_tokens: u32,
+    /// Cost per million input tokens (USD) within the tier
+    pub input_per_mtok: f64,
+    /// Cost per million output tokens (USD) within the tier
+    pub output_per_mtok: f64,
 }
 
 /// Configuration for the ONNX ML routing strategy
@@ -432,4 +475,41 @@ const fn default_error_penalty() -> f64 {
 
 const fn default_min_samples() -> usize {
     10
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(extra: &str) -> ModelProfileConfig {
+        toml::from_str(&format!(
+            "provider = \"anthropic\"\nmodel = \"claude-haiku-5-5\"\ninput_per_mtok = 0.10\noutput_per_mtok = 0.50\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn priced_profile_is_billable() {
+        assert!(profile("").check_billable_price().is_ok());
+        let tiered = profile(
+            "[long_context_pricing]\nabove_input_tokens = 100000\ninput_per_mtok = 0.50\noutput_per_mtok = 2.50",
+        );
+        assert!(tiered.check_billable_price().is_ok());
+    }
+
+    #[test]
+    fn missing_or_zero_price_is_not_billable() {
+        let unpriced: ModelProfileConfig =
+            toml::from_str("provider = \"anthropic\"\nmodel = \"claude-opus-5-5\"").unwrap();
+        assert!(unpriced.check_billable_price().is_err());
+
+        let mut zero_output = profile("");
+        zero_output.output_per_mtok = 0.0;
+        assert!(zero_output.check_billable_price().is_err());
+
+        let cheaper_long_tier = profile(
+            "[long_context_pricing]\nabove_input_tokens = 100000\ninput_per_mtok = 0.05\noutput_per_mtok = 2.50",
+        );
+        assert!(cheaper_long_tier.check_billable_price().is_err());
+    }
 }

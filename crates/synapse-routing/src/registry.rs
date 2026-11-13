@@ -3,7 +3,7 @@
 //! Config-driven profiles analogous to `LLMRouter`'s `llm_data` JSON
 //! but sourced from TOML configuration.
 
-use synapse_config::ModelProfileConfig;
+use synapse_config::{LongContextPricing, ModelProfileConfig};
 
 use crate::analysis::RequiredCapabilities;
 
@@ -30,6 +30,8 @@ pub struct ModelProfile {
     pub long_context: bool,
     /// Observed p50 latency in milliseconds (updated at runtime)
     pub observed_latency_p50_ms: Option<f64>,
+    /// Higher rate applied to the whole request once the prompt is long
+    pub long_context_pricing: Option<LongContextPricing>,
 }
 
 impl ModelProfile {
@@ -39,9 +41,18 @@ impl ModelProfile {
     }
 
     /// Estimate the cost of a request with the given token counts
+    ///
+    /// A prompt above the long-context threshold prices every token of the
+    /// request at the long-context rate, as the provider bills it
     pub fn estimate_cost(&self, input_tokens: usize, output_tokens: usize) -> f64 {
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * self.input_per_mtok;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * self.output_per_mtok;
+        let (input_rate, output_rate) = match &self.long_context_pricing {
+            Some(tier) if input_tokens > tier.above_input_tokens as usize => {
+                (tier.input_per_mtok, tier.output_per_mtok)
+            }
+            _ => (self.input_per_mtok, self.output_per_mtok),
+        };
+        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_rate;
+        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_rate;
         input_cost + output_cost
     }
 }
@@ -68,6 +79,7 @@ impl ModelRegistry {
                 vision: c.capabilities.vision,
                 long_context: c.capabilities.long_context,
                 observed_latency_p50_ms: None,
+                long_context_pricing: c.long_context_pricing.clone(),
             })
             .collect();
 
@@ -162,6 +174,7 @@ mod tests {
                     vision: true,
                     long_context: true,
                 },
+                long_context_pricing: None,
             },
             ModelProfileConfig {
                 provider: "openai".to_owned(),
@@ -175,6 +188,7 @@ mod tests {
                     vision: true,
                     long_context: false,
                 },
+                long_context_pricing: None,
             },
         ]
     }
@@ -200,6 +214,25 @@ mod tests {
         let cost = profile.estimate_cost(1_000_000, 500_000);
         // 1M * 0.15/1M + 0.5M * 0.60/1M = 0.15 + 0.30 = 0.45
         assert!((cost - 0.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn long_prompts_price_the_whole_request_at_the_long_context_rate() {
+        let mut config = test_profiles().remove(1);
+        config.input_per_mtok = 0.10;
+        config.output_per_mtok = 0.50;
+        config.long_context_pricing = Some(synapse_config::LongContextPricing {
+            above_input_tokens: 100_000,
+            input_per_mtok: 0.50,
+            output_per_mtok: 2.50,
+        });
+        let registry = ModelRegistry::from_config(&[config]);
+        let profile = registry.find("openai", "gpt-4o-mini").unwrap();
+
+        // At the threshold: base rate (0.1M * 0.10 + 1M * 0.50)
+        assert!((profile.estimate_cost(100_000, 1_000_000) - 0.51).abs() < 1e-9);
+        // Above it: every token at the long rate (0.2M * 0.50 + 1M * 2.50)
+        assert!((profile.estimate_cost(200_000, 1_000_000) - 2.6).abs() < 1e-9);
     }
 
     #[test]
@@ -249,6 +282,7 @@ mod tests {
                 vision: false,
                 long_context: false,
             },
+            long_context_pricing: None,
         }];
         let registry = ModelRegistry::from_config(&profiles);
         let caps = RequiredCapabilities {

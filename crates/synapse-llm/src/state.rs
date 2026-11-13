@@ -1560,6 +1560,7 @@ mod tests {
             output_per_mtok: 15.0,
             quality: 0.9,
             capabilities: synapse_config::ModelCapabilities::default(),
+            long_context_pricing: None,
         }])
     }
 
