@@ -20,6 +20,8 @@ pub struct Server {
     /// Behavior when billing service is unreachable
     #[cfg(feature = "billing")]
     billing_fail_mode: FailMode,
+    #[cfg(feature = "billing")]
+    margins: synapse_core::MarginPolicy,
 }
 
 impl Server {
@@ -35,9 +37,25 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+    pub fn set_billing_client(
+        &mut self,
+        client: synapse_billing::AetherClient,
+        fail_mode: FailMode,
+        margins: synapse_core::MarginPolicy,
+    ) {
         self.billing_client = Some(client);
         self.billing_fail_mode = fail_mode;
+        self.margins = margins;
+    }
+
+    /// Amount to charge the request's billing identity for usage costing
+    /// `base_usd` upstream, marked up for the billed product
+    #[cfg(feature = "billing")]
+    fn charge(&self, context: &RequestContext, provider_name: &str, base_usd: f64) -> f64 {
+        context
+            .billing_identity
+            .as_ref()
+            .map_or(0.0, |identity| self.margins.charge(identity, provider_name, base_usd))
     }
 
     /// Transcribe audio using the appropriate provider
@@ -71,7 +89,7 @@ impl Server {
             // Estimate cost based on audio size (rough proxy: 1 second ~= 16KB at 16kHz 16-bit mono)
             #[allow(clippy::cast_precision_loss)]
             let estimated_duration_secs = request.audio.len() as f64 / 16_000.0;
-            let estimated_cost = estimated_duration_secs * 0.0001; // ~$0.006/min
+            let estimated_cost = self.charge(context, provider.name(), estimated_duration_secs * 0.0001); // ~$0.006/min
             if estimated_cost > 0.0 {
                 self.check_credits(context, estimated_cost).await?;
             }
@@ -225,7 +243,7 @@ impl Server {
 
         // Cost based on audio duration (~$0.006/min whisper pricing)
         let duration_secs = f64::from(audio_bytes) / 16_000.0;
-        let actual_cost = duration_secs * 0.0001;
+        let actual_cost = self.charge(context, provider_name, duration_secs * 0.0001);
 
         if actual_cost <= 0.0 {
             return;
@@ -307,6 +325,8 @@ impl<'a> SttServerBuilder<'a> {
             billing_client: None,
             #[cfg(feature = "billing")]
             billing_fail_mode: FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
         })
     }
 }

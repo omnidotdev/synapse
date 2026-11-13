@@ -20,6 +20,8 @@ pub struct Server {
     /// Behavior when billing service is unreachable
     #[cfg(feature = "billing")]
     billing_fail_mode: FailMode,
+    #[cfg(feature = "billing")]
+    margins: synapse_core::MarginPolicy,
 }
 
 impl Server {
@@ -35,9 +37,25 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+    pub fn set_billing_client(
+        &mut self,
+        client: synapse_billing::AetherClient,
+        fail_mode: FailMode,
+        margins: synapse_core::MarginPolicy,
+    ) {
         self.billing_client = Some(client);
         self.billing_fail_mode = fail_mode;
+        self.margins = margins;
+    }
+
+    /// Amount to charge the request's billing identity for usage costing
+    /// `base_usd` upstream, marked up for the billed product
+    #[cfg(feature = "billing")]
+    fn charge(&self, context: &RequestContext, provider_name: &str, base_usd: f64) -> f64 {
+        context
+            .billing_identity
+            .as_ref()
+            .map_or(0.0, |identity| self.margins.charge(identity, provider_name, base_usd))
     }
 
     /// Synthesize text to speech using the appropriate provider
@@ -71,7 +89,7 @@ impl Server {
             // Estimate cost based on character count (~$0.015/1K chars for TTS)
             let char_count = request.input.len();
             #[allow(clippy::cast_precision_loss)]
-            let estimated_cost = char_count as f64 * 0.000_015;
+            let estimated_cost = self.charge(context, provider.name(), char_count as f64 * 0.000_015);
             if estimated_cost > 0.0 {
                 self.check_credits(context, estimated_cost).await?;
             }
@@ -226,7 +244,7 @@ impl Server {
         }
 
         // Cost based on character count (~$0.015/1K chars)
-        let actual_cost = f64::from(char_count) * 0.000_015;
+        let actual_cost = self.charge(context, provider_name, f64::from(char_count) * 0.000_015);
 
         if actual_cost <= 0.0 {
             return;
@@ -308,6 +326,8 @@ impl<'a> TtsServerBuilder<'a> {
             billing_client: None,
             #[cfg(feature = "billing")]
             billing_fail_mode: FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
         })
     }
 }

@@ -74,6 +74,9 @@ pub struct BillingIdentity {
     pub entity_id: String,
     /// Billing mode for this request
     pub mode: BillingMode,
+    /// Plan the key resolved to, used to pick the gateway's own tier margin
+    /// (`None` when the plan is unknown, e.g. JWT-authenticated requests)
+    pub plan: Option<String>,
 }
 
 /// Per-request token limits resolved from entitlements

@@ -110,6 +110,7 @@ fn resolve_billing_identity(result: &ResolvedKey, default_app_id: &str) -> Billi
             KeyMode::Byok => BillingMode::Byok,
             KeyMode::Managed | KeyMode::Manual => BillingMode::Managed,
         },
+        plan: Some(result.plan.clone()),
     }
 }
 

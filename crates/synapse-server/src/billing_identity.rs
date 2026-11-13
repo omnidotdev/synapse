@@ -46,6 +46,7 @@ pub async fn billing_identity_middleware(config: BillingConfig, request: Request
         entity_type: config.entity_type.clone(),
         entity_id: subject.clone(),
         mode,
+        plan: None,
     };
 
     let mut request = request;

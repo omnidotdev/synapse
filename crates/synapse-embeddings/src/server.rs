@@ -20,6 +20,8 @@ pub struct Server {
     /// Behavior when billing service is unreachable
     #[cfg(feature = "billing")]
     billing_fail_mode: FailMode,
+    #[cfg(feature = "billing")]
+    margins: synapse_core::MarginPolicy,
 }
 
 impl Server {
@@ -35,9 +37,25 @@ impl Server {
     ///
     /// Must be called before the server is shared with handlers.
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+    pub fn set_billing_client(
+        &mut self,
+        client: synapse_billing::AetherClient,
+        fail_mode: FailMode,
+        margins: synapse_core::MarginPolicy,
+    ) {
         self.billing_client = Some(client);
         self.billing_fail_mode = fail_mode;
+        self.margins = margins;
+    }
+
+    /// Amount to charge the request's billing identity for usage costing
+    /// `base_usd` upstream, marked up for the billed product
+    #[cfg(feature = "billing")]
+    fn charge(&self, context: &RequestContext, provider_name: &str, base_usd: f64) -> f64 {
+        context
+            .billing_identity
+            .as_ref()
+            .map_or(0.0, |identity| self.margins.charge(identity, provider_name, base_usd))
     }
 
     /// Generate embeddings using the appropriate provider
@@ -71,7 +89,7 @@ impl Server {
             // Estimate tokens from input text length (~4 chars per token)
             let estimated_tokens: usize = request.input.as_vec().iter().map(|s| s.len() / 4).sum();
             #[allow(clippy::cast_precision_loss)]
-            let estimated_cost = estimated_tokens as f64 * 0.000_000_02; // ~$0.02/1M tokens
+            let estimated_cost = self.charge(context, provider.name(), estimated_tokens as f64 * 0.000_000_02); // ~$0.02/1M tokens
             if estimated_cost > 0.0 {
                 self.check_credits(context, estimated_cost).await?;
             }
@@ -227,7 +245,7 @@ impl Server {
         }
 
         // Cost based on token count (~$0.02/1M tokens for text-embedding-3-small)
-        let actual_cost = f64::from(prompt_tokens) * 0.000_000_02;
+        let actual_cost = self.charge(context, provider_name, f64::from(prompt_tokens) * 0.000_000_02);
 
         if actual_cost <= 0.0 {
             return;
@@ -300,6 +318,8 @@ impl<'a> EmbeddingsServerBuilder<'a> {
             billing_client: None,
             #[cfg(feature = "billing")]
             billing_fail_mode: FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
         })
     }
 }
