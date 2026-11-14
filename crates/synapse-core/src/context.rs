@@ -117,12 +117,12 @@ pub struct BillingIdentity {
     pub app_id: String,
     /// Entity type (e.g. "user")
     pub entity_type: String,
-    /// Entity identifier (e.g. user ID from JWT sub claim)
+    /// Entity identifier (e.g. the key owner's user ID)
     pub entity_id: String,
     /// Billing mode for this request
     pub mode: BillingMode,
     /// Plan the key resolved to, used to pick the gateway's own tier margin
-    /// (`None` when the plan is unknown, e.g. JWT-authenticated requests)
+    /// (`None` when the plan is unknown)
     pub plan: Option<String>,
 }
 
