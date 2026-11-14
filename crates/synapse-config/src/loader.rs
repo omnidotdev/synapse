@@ -82,6 +82,28 @@ impl Config {
                     profile.check_billable_price().map_err(anyhow::Error::msg)?;
                 }
             }
+
+            // A product's models are served on managed keys and listed with
+            // their retail price, so each must be a priced model of a
+            // configured provider
+            for (product, policy) in &billing.products {
+                for model in &policy.models {
+                    let (provider, name) = model.split_once('/').unwrap_or_default();
+                    if !self.llm.providers.contains_key(provider) {
+                        anyhow::bail!("billing.products.{product}: {model} names an unconfigured LLM provider");
+                    }
+                    let priced = self
+                        .llm
+                        .routing
+                        .models
+                        .iter()
+                        .find(|profile| profile.provider == provider && profile.model == name)
+                        .is_some_and(|profile| profile.check_billable_price().is_ok());
+                    if !priced {
+                        anyhow::bail!("billing.products.{product}: {model} has no priced [[llm.routing.models]] entry");
+                    }
+                }
+            }
         }
 
         // Validate token rate limits require client identification
@@ -155,6 +177,53 @@ mod tests {
             "#
         );
         toml::from_str(&toml).unwrap()
+    }
+
+    const PRICED_MODEL: &str = r#"
+            [[llm.routing.models]]
+            provider = "openai"
+            model = "gpt-test"
+            input_per_mtok = 1.0
+            output_per_mtok = 2.0
+    "#;
+
+    fn config_with_policy(models: &str, profiles: &str) -> Config {
+        let toml = format!(
+            r#"
+            [llm.providers.openai]
+            type = "openai"
+            api_key = "sk-test"
+            {profiles}
+
+            [billing]
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+
+            [billing.products.keystone]
+            models = {models}
+            default_model = "openai/gpt-test"
+            "#
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    #[test]
+    fn product_policy_models_must_be_priced() {
+        assert!(
+            config_with_policy(r#"["openai/gpt-test"]"#, PRICED_MODEL)
+                .validate()
+                .is_ok()
+        );
+        // No price profile
+        assert!(config_with_policy(r#"["openai/gpt-test"]"#, "").validate().is_err());
+        // Unconfigured provider
+        assert!(
+            config_with_policy(r#"["openai/gpt-test", "nope/gpt-test"]"#, PRICED_MODEL)
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

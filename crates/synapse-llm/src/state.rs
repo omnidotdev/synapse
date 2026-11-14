@@ -14,6 +14,7 @@ use synapse_routing::{FeedbackTracker, ModelRegistry, RequestFeedback, StrategyR
 use crate::discovery;
 use crate::error::LlmError;
 use crate::health::ProviderHealthTracker;
+use crate::policy::{ProductModelPolicy, ProductPolicies};
 use crate::provider::Provider;
 use crate::routing::ModelRouter;
 use crate::types::{CompletionRequest, CompletionResponse, RequestCost, StreamEvent, Usage};
@@ -75,6 +76,11 @@ pub(crate) struct LlmStateInner {
     pub(crate) managed_keys: HashMap<String, SecretString>,
     /// Markup applied to upstream cost for managed usage
     pub(crate) margins: MarginPolicy,
+    /// Chat models each product-scoped key may use
+    pub(crate) product_policies: ProductPolicies,
+    /// Routing strategies per product with a policy, configured with only the
+    /// models that product may use
+    pub(crate) product_strategies: HashMap<String, StrategyRegistry>,
     /// Usage recorder for billing metering (billing feature only)
     #[cfg(feature = "billing")]
     pub(crate) usage_recorder: Option<synapse_billing::UsageRecorder>,
@@ -114,7 +120,7 @@ impl LlmState {
         // model is refused here)
         #[cfg(feature = "billing")]
         {
-            let stages = self.serving_candidates(&provider_name, &model_id, explicit_provider, false);
+            let stages = self.serving_candidates(&context, &provider_name, &model_id, explicit_provider, false);
             if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
                 self.check_spend(&context, cost).await?;
             }
@@ -387,7 +393,7 @@ impl LlmState {
         // refused here)
         #[cfg(feature = "billing")]
         {
-            let stages = self.serving_candidates(&provider_name, &model_id, explicit_provider, cascade);
+            let stages = self.serving_candidates(&context, &provider_name, &model_id, explicit_provider, cascade);
             if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
                 self.check_spend(&context, cost).await?;
             }
@@ -545,6 +551,8 @@ impl LlmState {
                 feedback,
                 managed_keys: HashMap::new(),
                 margins: MarginPolicy::default(),
+                product_policies: ProductPolicies::default(),
+                product_strategies: HashMap::new(),
                 #[cfg(feature = "billing")]
                 usage_recorder: None,
                 #[cfg(feature = "billing")]
@@ -579,6 +587,26 @@ impl LlmState {
     pub fn set_margin_policy(&mut self, margins: MarginPolicy) {
         let inner = Arc::get_mut(&mut self.inner).expect("set_margin_policy must be called before state is shared");
         inner.margins = margins;
+    }
+
+    /// Configure the chat models each product-scoped key may use
+    ///
+    /// Must be called before the state is shared with handlers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after the inner `Arc` has been cloned
+    pub fn set_product_policies(&mut self, policies: ProductPolicies) {
+        let inner = Arc::get_mut(&mut self.inner).expect("set_product_policies must be called before state is shared");
+        inner.product_strategies = policies
+            .iter()
+            .map(|(product, policy)| {
+                let mut config = inner.routing_config.clone();
+                restrict_routing_config(&mut config, policy);
+                (product.clone(), StrategyRegistry::from_config(&config))
+            })
+            .collect();
+        inner.product_policies = policies;
     }
 
     /// Attach a usage recorder for billing metering
@@ -629,6 +657,100 @@ impl LlmState {
         self.inner.router.list_models().await
     }
 
+    /// The models a caller may use, as `GET /v1/models` lists them
+    ///
+    /// A product-scoped key with a model policy sees exactly its product's
+    /// models, in policy order, with its default flagged. Any other caller
+    /// sees every model the gateway serves. Each entry is priced in retail
+    /// credits per million tokens with the margin the caller is billed at, or
+    /// unpriced when the caller is not billed for it (BYOK, no billing
+    /// identity, or a model with no price profile)
+    pub async fn models_for(&self, context: Option<&RequestContext>) -> Vec<ListedModel> {
+        if let Some(policy) = context.and_then(|ctx| self.inner.product_policies.for_context(ctx)) {
+            return policy
+                .models()
+                .iter()
+                .map(|(provider, model)| {
+                    let mut listed = self.listed_model(context, provider, model, format!("{provider}/{model}"));
+                    listed.default = policy.is_default(provider, model);
+                    listed
+                })
+                .collect();
+        }
+
+        let mut listed = Vec::new();
+        for (id, model) in self.inner.router.list_models().await {
+            let provider = match self.inner.router.resolve(&id).await {
+                Ok(resolved) => resolved.provider_name,
+                Err(_) => id.split_once('/').map(|(p, _)| p.to_owned()).unwrap_or_default(),
+            };
+            listed.push(self.listed_model(context, &provider, &model, id));
+        }
+        listed
+    }
+
+    /// One listing entry for `provider`/`model`, listed under `id`
+    fn listed_model(&self, context: Option<&RequestContext>, provider: &str, model: &str, id: String) -> ListedModel {
+        let profile = self.inner.model_registry.find(provider, model);
+        let billed = context
+            .and_then(|ctx| ctx.billing_identity.as_ref())
+            .filter(|identity| identity.mode == synapse_core::BillingMode::Managed);
+        let credits_per_mtok = profile.zip(billed).map(|(profile, identity)| {
+            let margin = self
+                .inner
+                .margins
+                .resolve(Some(&identity.app_id), identity.plan.as_deref(), provider);
+            CreditsPerMtok {
+                input: credits(profile.input_per_mtok * margin),
+                output: credits(profile.output_per_mtok * margin),
+            }
+        });
+        ListedModel {
+            id,
+            display_name: profile
+                .and_then(|p| p.display_name.clone())
+                .unwrap_or_else(|| crate::policy::derived_display_name(model)),
+            default: false,
+            context_window: profile.map(|p| p.context_window).filter(|window| *window > 0),
+            credits_per_mtok,
+        }
+    }
+
+    /// The model policy of the product a request bills against, if any
+    fn product_policy(&self, context: &RequestContext) -> Option<&ProductModelPolicy> {
+        self.inner.product_policies.for_context(context)
+    }
+
+    /// Whether the request's product may be served `provider_name`/`model_id`
+    fn allowed_for(&self, context: &RequestContext, provider_name: &str, model_id: &str) -> bool {
+        self.product_policy(context)
+            .is_none_or(|policy| policy.allows(provider_name, model_id))
+    }
+
+    /// Resolve the product's default model, for `auto` and an unentitled
+    /// routing class
+    fn resolve_policy_default(
+        &self,
+        policy: &ProductModelPolicy,
+    ) -> Result<(String, String, Arc<dyn Provider>, bool), LlmError> {
+        let (provider_name, model_id) = policy.default_model();
+        let provider = self
+            .inner
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| LlmError::ProviderNotFound {
+                provider: provider_name.to_owned(),
+            })?;
+        // Served like an explicitly selected model: never failed over or
+        // cascaded to a model the product did not choose
+        Ok((
+            provider_name.to_owned(),
+            model_id.to_owned(),
+            Arc::clone(provider),
+            true,
+        ))
+    }
+
     /// Resolve a model name and get the corresponding provider
     ///
     /// Handles both normal model names and virtual routing classes
@@ -639,17 +761,49 @@ impl LlmState {
         request: &CompletionRequest,
         context: &RequestContext,
     ) -> Result<(String, String, Arc<dyn Provider>, bool), LlmError> {
+        let policy = self.product_policy(context);
+
         // Check for virtual routing classes, gated on smart_routing entitlement
-        if self.inner.routing_config.enabled && ROUTING_CLASSES.contains(&model) {
-            let entitled = self.check_smart_routing_entitlement(context).await;
-            if entitled {
-                let (pn, mi, p) = self.resolve_via_routing(model, request)?;
-                return Ok((pn, mi, p, false));
+        if ROUTING_CLASSES.contains(&model) {
+            if self.inner.routing_config.enabled && self.check_smart_routing_entitlement(context).await {
+                match policy {
+                    None => {
+                        let (pn, mi, p) = self.resolve_via_routing(model, request, None, context)?;
+                        return Ok((pn, mi, p, false));
+                    }
+                    // A product routes only among its own models, and falls
+                    // back to its default when none fits the request
+                    Some(policy) => match self.resolve_via_routing(model, request, Some(policy), context) {
+                        Ok((pn, mi, p)) => return Ok((pn, mi, p, false)),
+                        Err(e) => {
+                            tracing::info!(error = %e, "no product model fits smart routing, using the product default");
+                        }
+                    },
+                }
+            }
+            // A product's virtual model resolves to its default
+            if let Some(policy) = policy {
+                return self.resolve_policy_default(policy);
             }
             tracing::debug!("smart routing not entitled, falling back to requested model");
         }
 
-        let resolved = self.inner.router.resolve(model).await?;
+        let resolved = match self.inner.router.resolve(model).await {
+            Ok(resolved) => resolved,
+            // A product key sees only its own models, so an unknown model is
+            // simply one it may not use
+            Err(LlmError::ModelNotFound { .. } | LlmError::ProviderNotFound { .. }) if policy.is_some() => {
+                return Err(LlmError::ModelNotAllowed {
+                    model: model.to_owned(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        if policy.is_some_and(|policy| !policy.allows(&resolved.provider_name, &resolved.model_id)) {
+            return Err(LlmError::ModelNotAllowed {
+                model: model.to_owned(),
+            });
+        }
         let provider = self
             .inner
             .providers
@@ -666,10 +820,15 @@ impl LlmState {
     }
 
     /// Resolve a virtual model name via the smart routing system
+    ///
+    /// With a product `policy`, routing chooses only among the product's
+    /// models: configured threshold or cascade models outside it are ignored
     fn resolve_via_routing(
         &self,
         routing_class: &str,
         request: &CompletionRequest,
+        policy: Option<&ProductModelPolicy>,
+        context: &RequestContext,
     ) -> Result<(String, String, Arc<dyn Provider>), LlmError> {
         use crate::types::message::{Content, ContentPart, Role};
 
@@ -706,7 +865,24 @@ impl LlmState {
         let is_multi_turn = user_message_count > 1;
 
         // Apply routing class overrides
-        let config = self.map_routing_class(routing_class);
+        let mut config = self.map_routing_class(routing_class);
+        let restricted;
+        let (registry, strategies) = match policy {
+            None => (&self.inner.model_registry, &self.inner.strategy_registry),
+            Some(policy) => {
+                restrict_routing_config(&mut config, policy);
+                restricted = self
+                    .inner
+                    .model_registry
+                    .restricted(|profile| policy.allows(&profile.provider, &profile.model));
+                let strategies = context
+                    .billing_identity
+                    .as_ref()
+                    .and_then(|identity| self.inner.product_strategies.get(&identity.app_id))
+                    .ok_or_else(|| LlmError::InvalidRequest("no routing strategies for this product".to_owned()))?;
+                (&restricted, strategies)
+            }
+        };
 
         let input = synapse_routing::AnalysisInput {
             messages: &messages,
@@ -720,12 +896,18 @@ impl LlmState {
 
         let decision = synapse_routing::route_with_strategy_registry(
             &input,
-            &self.inner.model_registry,
+            registry,
             &config,
-            &self.inner.strategy_registry,
+            strategies,
             Some(&self.inner.feedback),
         )
         .map_err(|e| LlmError::InvalidRequest(format!("routing failed: {e}")))?;
+
+        if policy.is_some_and(|policy| !policy.allows(&decision.provider, &decision.model)) {
+            return Err(LlmError::ModelNotAllowed {
+                model: format!("{}/{}", decision.provider, decision.model),
+            });
+        }
 
         let provider = self
             .inner
@@ -960,7 +1142,7 @@ impl LlmState {
 
                 let mut last_error = e;
 
-                for (alt_provider, alt_model) in self.failover_alternatives(provider_name, model_id) {
+                for (alt_provider, alt_model) in self.failover_alternatives(context, provider_name, model_id) {
                     if !self.inner.health.is_available(&alt_provider) {
                         tracing::debug!(
                             provider = %alt_provider,
@@ -1098,7 +1280,7 @@ impl LlmState {
 
                 let mut last_error = e;
 
-                for (alt_provider, alt_model) in self.failover_alternatives(provider_name, model_id) {
+                for (alt_provider, alt_model) in self.failover_alternatives(context, provider_name, model_id) {
                     if exclude.is_some_and(|ex| ex.provider == alt_provider && ex.model == alt_model)
                         || !self.inner.health.is_available(&alt_provider)
                         || !self.can_bill(context, &alt_provider, &alt_model)
@@ -1265,8 +1447,11 @@ impl LlmState {
 
         let (esc_provider_name, esc_model_id) = &escalation;
 
-        // A managed request is never escalated to a model it cannot be billed for
-        if !self.can_bill(context, esc_provider_name, esc_model_id) {
+        // A managed request is never escalated to a model it cannot be billed
+        // for, nor a product key to a model outside its product's policy
+        if !self.can_bill(context, esc_provider_name, esc_model_id)
+            || !self.allowed_for(context, esc_provider_name, esc_model_id)
+        {
             tracing::info!(
                 escalation_provider = %esc_provider_name,
                 escalation_model = %esc_model_id,
@@ -1408,13 +1593,22 @@ impl LlmState {
 
     /// The alternatives failover may try once `provider_name`/`model_id`
     /// fails, in order (`max_attempts` includes the primary)
-    fn failover_alternatives(&self, provider_name: &str, model_id: &str) -> Vec<(String, String)> {
+    ///
+    /// A product-scoped key never fails over to a model outside its product's
+    /// policy
+    fn failover_alternatives(
+        &self,
+        context: &RequestContext,
+        provider_name: &str,
+        model_id: &str,
+    ) -> Vec<(String, String)> {
         if !self.inner.failover.enabled {
             return Vec::new();
         }
         let remaining = self.inner.failover.max_attempts.saturating_sub(1);
         ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups)
             .into_iter()
+            .filter(|(provider, model)| self.allowed_for(context, provider, model))
             .take(remaining)
             .collect()
     }
@@ -1429,6 +1623,7 @@ impl LlmState {
     #[cfg(feature = "billing")]
     fn serving_candidates(
         &self,
+        context: &RequestContext,
         provider_name: &str,
         model_id: &str,
         explicit_provider: bool,
@@ -1438,13 +1633,14 @@ impl LlmState {
         if explicit_provider {
             return vec![initial];
         }
-        initial.extend(self.failover_alternatives(provider_name, model_id));
+        initial.extend(self.failover_alternatives(context, provider_name, model_id));
         let mut stages = vec![initial];
         if cascade
             && let Ok((esc_provider, esc_model)) = self.resolve_escalation_model(&self.inner.routing_config.cascade)
+            && self.allowed_for(context, &esc_provider, &esc_model)
         {
             let mut escalation = vec![(esc_provider.clone(), esc_model.clone())];
-            escalation.extend(self.failover_alternatives(&esc_provider, &esc_model));
+            escalation.extend(self.failover_alternatives(context, &esc_provider, &esc_model));
             stages.push(escalation);
         }
         stages
@@ -1480,6 +1676,56 @@ impl LlmState {
         }
         let config = self.map_routing_class(model);
         matches!(config.strategy, synapse_config::RoutingStrategy::Cascade)
+    }
+}
+
+/// A model as `GET /v1/models` lists it for a caller
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListedModel {
+    /// Id to send as the request's `model`
+    pub id: String,
+    /// Human-readable name for model pickers
+    pub display_name: String,
+    /// Whether this is the caller's default model (what `auto` resolves to)
+    pub default: bool,
+    /// Context window in tokens, when known
+    pub context_window: Option<u32>,
+    /// Retail price for the caller, when the caller is billed for the model
+    pub credits_per_mtok: Option<CreditsPerMtok>,
+}
+
+/// Retail price in credits ($0.01 each) per million tokens, margin included
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CreditsPerMtok {
+    /// Credits per million input tokens
+    pub input: f64,
+    /// Credits per million output tokens
+    pub output: f64,
+}
+
+/// Credits for a US dollar amount, to four decimal places
+fn credits(usd: f64) -> f64 {
+    (usd * 100.0 * 10_000.0).round() / 10_000.0
+}
+
+/// Drop configured routing models a product may not use, so the strategy
+/// chooses among the product's own models instead
+fn restrict_routing_config(config: &mut RoutingConfig, policy: &ProductModelPolicy) {
+    let allowed = |id: &Option<String>| {
+        id.as_deref()
+            .and_then(|id| id.split_once('/'))
+            .is_some_and(|(provider, model)| policy.allows(provider, model))
+    };
+    // The threshold strategy uses its two models as a pair
+    if !(allowed(&config.threshold.low_complexity_model) && allowed(&config.threshold.high_complexity_model)) {
+        config.threshold.low_complexity_model = None;
+        config.threshold.high_complexity_model = None;
+    }
+    if !allowed(&config.cascade.initial_model) {
+        config.cascade.initial_model = None;
+    }
+    if !allowed(&config.cascade.escalation_model) {
+        config.cascade.escalation_model = None;
     }
 }
 
@@ -1898,6 +2144,7 @@ mod tests {
         ModelRegistry::from_config(&[synapse_config::ModelProfileConfig {
             provider: "anthropic".to_owned(),
             model: "claude-sonnet-4-5-20250929".to_owned(),
+            display_name: None,
             context_window: 200_000,
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,

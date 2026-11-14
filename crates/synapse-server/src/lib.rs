@@ -92,6 +92,20 @@ impl Server {
             };
             llm_state.set_margin_policy(margins.clone());
 
+            // Product-scoped keys may use only their product's chat models
+            llm_state.set_product_policies(synapse_llm::policy::ProductPolicies::new(
+                &billing_config.app_id,
+                &billing_config.products,
+            ));
+            for (product, policy) in &billing_config.products {
+                tracing::info!(
+                    product,
+                    models = policy.models.len(),
+                    default_model = %policy.default_model,
+                    "product model policy"
+                );
+            }
+
             // Products that include AI in their tier draw on an allowance
             // meter instead of the credit wallet, for every modality
             let spend_policy = synapse_billing::SpendPolicy::new(billing_config.included_allowance_products.clone());

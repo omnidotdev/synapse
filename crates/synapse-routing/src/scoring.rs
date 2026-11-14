@@ -59,6 +59,7 @@ mod tests {
         let registry = ModelRegistry::from_config(&[ModelProfileConfig {
             provider: "test".to_owned(),
             model: "model-1".to_owned(),
+            display_name: None,
             context_window: 128_000,
             input_per_mtok: 1.0,
             output_per_mtok: 2.0,

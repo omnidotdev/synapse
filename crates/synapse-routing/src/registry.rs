@@ -14,6 +14,8 @@ pub struct ModelProfile {
     pub provider: String,
     /// Model identifier
     pub model: String,
+    /// Human-readable name for model pickers, when configured
+    pub display_name: Option<String>,
     /// Context window in tokens
     pub context_window: u32,
     /// Cost per million input tokens (USD)
@@ -71,6 +73,7 @@ impl ModelRegistry {
             .map(|c| ModelProfile {
                 provider: c.provider.clone(),
                 model: c.model.clone(),
+                display_name: c.display_name.clone(),
                 context_window: c.context_window,
                 input_per_mtok: c.input_per_mtok,
                 output_per_mtok: c.output_per_mtok,
@@ -143,6 +146,13 @@ impl ModelRegistry {
         Self { profiles }
     }
 
+    /// Return a new registry containing only the profiles `keep` accepts
+    #[must_use]
+    pub fn restricted(&self, keep: impl Fn(&ModelProfile) -> bool) -> Self {
+        let profiles = self.profiles.iter().filter(|p| keep(p)).cloned().collect();
+        Self { profiles }
+    }
+
     /// Update observed latency for a model
     pub fn update_latency(&mut self, provider: &str, model: &str, latency_p50_ms: f64) {
         if let Some(profile) = self
@@ -165,6 +175,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "anthropic".to_owned(),
                 model: "claude-sonnet-4-20250514".to_owned(),
+                display_name: None,
                 context_window: 200_000,
                 input_per_mtok: 3.0,
                 output_per_mtok: 15.0,
@@ -179,6 +190,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "openai".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
+                display_name: None,
                 context_window: 128_000,
                 input_per_mtok: 0.15,
                 output_per_mtok: 0.60,
@@ -273,6 +285,7 @@ mod tests {
         let profiles = vec![ModelProfileConfig {
             provider: "local".to_owned(),
             model: "tiny".to_owned(),
+            display_name: None,
             context_window: 4096,
             input_per_mtok: 0.0,
             output_per_mtok: 0.0,
@@ -291,5 +304,14 @@ mod tests {
         };
         let filtered = registry.filtered(&caps);
         assert!(filtered.profiles().is_empty());
+    }
+
+    #[test]
+    fn restricted_keeps_only_accepted_profiles() {
+        let registry = ModelRegistry::from_config(&test_profiles());
+        let restricted = registry.restricted(|p| p.provider == "openai");
+        assert!(restricted.profiles().iter().all(|p| p.provider == "openai"));
+        assert!(!restricted.profiles().is_empty());
+        assert!(restricted.profiles().len() < registry.profiles().len());
     }
 }

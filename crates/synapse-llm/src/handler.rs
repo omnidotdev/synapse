@@ -12,7 +12,9 @@ use synapse_core::RequestContext;
 use crate::convert;
 use crate::error::LlmError;
 use crate::protocol::anthropic::{AnthropicRequest, AnthropicResponse};
-use crate::protocol::openai::{OpenAiModel, OpenAiModelList, OpenAiRequest, OpenAiResponse};
+use crate::protocol::openai::{
+    OpenAiModel, OpenAiModelList, OpenAiRequest, OpenAiResponse, SynapseCreditsPerMtok, SynapseModelInfo,
+};
 use crate::state::LlmState;
 use crate::types::{CompletionRequest, RequestCost, StreamEvent};
 
@@ -74,8 +76,17 @@ async fn openai_chat_completions(
 }
 
 /// Handle `GET /v1/models`
-async fn openai_list_models(State(state): State<LlmState>) -> Response {
-    let models = state.list_models().await;
+///
+/// Lists the models the calling key may use: a product-scoped key sees its
+/// product's models with the default flagged, any other key every model the
+/// gateway serves. Each entry carries Synapse's display name and the caller's
+/// retail price, so model pickers never hardcode them
+async fn openai_list_models(
+    State(state): State<LlmState>,
+    context: Option<axum::Extension<RequestContext>>,
+) -> Response {
+    let context = context.map(|axum::Extension(context)| context);
+    let models = state.models_for(context.as_ref()).await;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -84,11 +95,20 @@ async fn openai_list_models(State(state): State<LlmState>) -> Response {
 
     let data: Vec<OpenAiModel> = models
         .into_iter()
-        .map(|(display_name, _model_id)| OpenAiModel {
-            id: display_name,
+        .map(|listed| OpenAiModel {
+            id: listed.id,
             object: "model".to_owned(),
             created: now,
             owned_by: "synapse".to_owned(),
+            synapse: Some(SynapseModelInfo {
+                display_name: listed.display_name,
+                default: listed.default,
+                context_window: listed.context_window,
+                credits_per_mtok: listed.credits_per_mtok.map(|price| SynapseCreditsPerMtok {
+                    input: price.input,
+                    output: price.output,
+                }),
+            }),
         })
         .collect();
 

@@ -55,14 +55,17 @@ api_key = "{{ env.NVIDIA_API_KEY }}"
 enabled = true
 strategy = "threshold"
 
+# Current-generation priced models: Haiku 5.5 undercuts gpt-4o-mini at higher
+# quality, and Sonnet 5.5 undercuts Sonnet 4.5 at higher quality
 [llm.routing.threshold]
-low_complexity_model = "openai/gpt-4o-mini"
-high_complexity_model = "anthropic/claude-sonnet-4-5-20250929"
+low_complexity_model = "anthropic/claude-haiku-5-5"
+high_complexity_model = "anthropic/claude-sonnet-5-5"
 quality_floor = 0.7
 
 [[llm.routing.models]]
 provider = "openai"
 model = "gpt-4o-mini"
+display_name = "GPT-4o mini"
 input_per_mtok = 0.15
 output_per_mtok = 0.60
 quality = 0.7
@@ -74,6 +77,7 @@ vision = true
 [[llm.routing.models]]
 provider = "openai"
 model = "gpt-4o"
+display_name = "GPT-4o"
 input_per_mtok = 2.50
 output_per_mtok = 10.00
 quality = 0.88
@@ -85,6 +89,7 @@ vision = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-opus-4-6"
+display_name = "Claude Opus 4.6"
 input_per_mtok = 5.00
 output_per_mtok = 25.00
 quality = 0.97
@@ -97,6 +102,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
+display_name = "Claude Sonnet 4.5"
 input_per_mtok = 3.00
 output_per_mtok = 15.00
 quality = 0.93
@@ -108,7 +114,21 @@ long_context = true
 
 [[llm.routing.models]]
 provider = "anthropic"
+model = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6"
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+quality = 0.93
+context_window = 1000000
+[llm.routing.models.capabilities]
+tool_calling = true
+vision = true
+long_context = true
+
+[[llm.routing.models]]
+provider = "anthropic"
 model = "claude-haiku-4-5-20251001"
+display_name = "Claude Haiku 4.5"
 input_per_mtok = 1.00
 output_per_mtok = 5.00
 quality = 0.75
@@ -120,6 +140,7 @@ vision = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-opus-5-5"
+display_name = "Claude Opus 5.5"
 input_per_mtok = 4.00
 output_per_mtok = 20.00
 quality = 0.98
@@ -132,6 +153,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-sonnet-5-5"
+display_name = "Claude Sonnet 5.5"
 input_per_mtok = 2.00
 output_per_mtok = 10.00
 quality = 0.95
@@ -144,6 +166,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-haiku-5-5"
+display_name = "Claude Haiku 5.5"
 input_per_mtok = 0.10
 output_per_mtok = 0.50
 quality = 0.85
@@ -161,6 +184,7 @@ output_per_mtok = 2.50
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-opus-5"
+display_name = "Claude Opus 5"
 input_per_mtok = 5.00
 output_per_mtok = 25.00
 quality = 0.97
@@ -173,6 +197,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-sonnet-5"
+display_name = "Claude Sonnet 5"
 input_per_mtok = 2.00
 output_per_mtok = 10.00
 quality = 0.94
@@ -185,6 +210,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-opus-4-8"
+display_name = "Claude Opus 4.8"
 input_per_mtok = 5.00
 output_per_mtok = 25.00
 quality = 0.97
@@ -197,6 +223,7 @@ long_context = true
 [[llm.routing.models]]
 provider = "openai"
 model = "o3-mini"
+display_name = "o3-mini"
 input_per_mtok = 1.10
 output_per_mtok = 4.40
 quality = 0.87
@@ -207,6 +234,7 @@ tool_calling = true
 [[llm.routing.models]]
 provider = "nvidia"
 model = "moonshotai/kimi-k2.5"
+display_name = "Kimi K2.5"
 input_per_mtok = 0.60
 output_per_mtok = 2.50
 quality = 0.89
@@ -340,6 +368,52 @@ backfeed = 2.0
 [billing.included_allowance_products]
 myfi = "ai_credits"
 backfeed = "ai_credits"
+
+# Chat models each product-scoped key may use, keyed by product. The key's
+# GET /v1/models lists exactly these (with display names, the default, and
+# retail credit prices), `auto` (and fast/best/cheap without the
+# smart_routing entitlement) resolves to the default, and any other model is
+# refused with a 400. Every model must be priced above. Products without an
+# entry are not restricted. Embeddings, images, and speech are not governed
+# by these lists
+[billing.products.keystone]
+models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
+default_model = "anthropic/claude-sonnet-5-5"
+
+# Sonnet 4.5 is facet-api's configured fallback model
+[billing.products.facet]
+models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-4-5-20250929"]
+default_model = "anthropic/claude-sonnet-5-5"
+
+# Haiku-class default (D5); paid tiers pick Sonnet explicitly
+[billing.products.beacon]
+models = [
+  "anthropic/claude-sonnet-5-5",
+  "anthropic/claude-opus-5-5",
+  "anthropic/claude-haiku-5-5",
+  "anthropic/claude-opus-4-6",
+  "anthropic/claude-sonnet-4-5-20250929",
+  "anthropic/claude-haiku-4-5-20251001",
+  "openai/gpt-4o",
+  "openai/gpt-4o-mini",
+  "openai/o3-mini",
+  "nvidia/moonshotai/kimi-k2.5",
+]
+default_model = "anthropic/claude-haiku-5-5"
+
+[billing.products.creator]
+models = [
+  "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-haiku-4-5-20251001",
+  "openai/gpt-4o",
+  "openai/gpt-4o-mini",
+]
+default_model = "openai/gpt-4o-mini"
+
+# Bulk categorization (Haiku) and interactive suggestions (Opus)
+[billing.products.myfi]
+models = ["anthropic/claude-haiku-4-5-20251001", "anthropic/claude-opus-4-6"]
+default_model = "anthropic/claude-haiku-4-5-20251001"
 
 [billing.managed_providers.openai]
 api_key = "{{ env.OPENAI_API_KEY }}"

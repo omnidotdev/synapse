@@ -311,6 +311,34 @@ pub struct OpenAiModel {
     /// Owner
     #[serde(default)]
     pub owned_by: String,
+    /// What Synapse knows about the model for this caller
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synapse: Option<SynapseModelInfo>,
+}
+
+/// Synapse's extension to a listed model, so model pickers never hardcode
+/// names, defaults, or prices
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SynapseModelInfo {
+    /// Human-readable name for model pickers
+    pub display_name: String,
+    /// Whether this is the caller's default model (what `auto` resolves to)
+    pub default: bool,
+    /// Context window in tokens, when known
+    pub context_window: Option<u32>,
+    /// Retail price for the caller in credits ($0.01 each) per million
+    /// tokens, margin included. `null` when the caller is not billed for the
+    /// model (bring-your-own-key, or a model with no managed price)
+    pub credits_per_mtok: Option<SynapseCreditsPerMtok>,
+}
+
+/// Credits per million tokens
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SynapseCreditsPerMtok {
+    /// Credits per million input tokens
+    pub input: f64,
+    /// Credits per million output tokens
+    pub output: f64,
 }
 
 // -- Error response --

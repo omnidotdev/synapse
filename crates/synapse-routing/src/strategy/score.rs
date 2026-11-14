@@ -115,6 +115,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "fast".to_owned(),
                 model: "small".to_owned(),
+                display_name: None,
                 context_window: 32_000,
                 input_per_mtok: 0.1,
                 output_per_mtok: 0.3,
@@ -125,6 +126,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "frontier".to_owned(),
                 model: "big".to_owned(),
+                display_name: None,
                 context_window: 200_000,
                 input_per_mtok: 10.0,
                 output_per_mtok: 30.0,

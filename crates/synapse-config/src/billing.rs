@@ -58,6 +58,13 @@ pub struct BillingConfig {
     /// the pooled credit wallet
     #[serde(default)]
     pub included_allowance_products: HashMap<String, String>,
+    /// Per-product chat model policy for product-scoped keys, keyed by app id
+    /// (e.g. `[billing.products.keystone]`). A product with a policy may only
+    /// use its listed models, `GET /v1/models` lists exactly those, and the
+    /// virtual `auto` model resolves to its default. A product without one
+    /// is not restricted
+    #[serde(default)]
+    pub products: IndexMap<String, ProductModelPolicyConfig>,
     /// Behavior when Aether is unreachable
     #[serde(default)]
     pub fail_mode: FailMode,
@@ -119,6 +126,54 @@ pub struct ManagedProviderConfig {
     /// Margin multiplier applied to upstream cost (e.g. 1.2 = 20% markup)
     #[serde(default = "default_margin")]
     pub margin: f64,
+}
+
+/// The chat models a product-scoped key may use
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductModelPolicyConfig {
+    /// Models the product may use, as "provider/model", in the order
+    /// `GET /v1/models` lists them
+    pub models: Vec<String>,
+    /// Model the virtual `auto` model (and `fast`, `best`, `cheap` without
+    /// the `smart_routing` entitlement) resolves to. Must be one of `models`
+    pub default_model: String,
+}
+
+impl ProductModelPolicyConfig {
+    /// Validate the policy for `product`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the policy lists no models, a model is not in
+    /// "provider/model" form or is listed twice, or the default is not listed
+    pub fn validate(&self, product: &str) -> Result<(), String> {
+        let label = format!("billing.products.{product}");
+        if self.models.is_empty() {
+            return Err(format!("{label}.models must list at least one model"));
+        }
+        for (index, model) in self.models.iter().enumerate() {
+            if !is_provider_model(model) {
+                return Err(format!("{label}.models: {model:?} must be \"provider/model\""));
+            }
+            if self.models[..index].contains(model) {
+                return Err(format!("{label}.models lists {model:?} twice"));
+            }
+        }
+        if !self.models.contains(&self.default_model) {
+            return Err(format!(
+                "{label}.default_model {:?} must be one of its models",
+                self.default_model
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `id` is a "provider/model" pair with both halves present
+fn is_provider_model(id: &str) -> bool {
+    id.split_once('/')
+        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
 }
 
 /// Configurable meter key names for Aether usage recording
@@ -257,6 +312,14 @@ impl BillingConfig {
                      digits, and underscores, got {meter:?}"
                 ));
             }
+        }
+        for (product, policy) in &self.products {
+            if product == &self.app_id {
+                return Err(format!(
+                    "billing.products.{product}: the gateway's own keys are not restricted to a product model policy"
+                ));
+            }
+            policy.validate(product)?;
         }
         Ok(())
     }
@@ -739,6 +802,55 @@ mod tests {
     fn validate_rejects_the_gateway_own_product_as_an_allowance_product() {
         // The gateway's own plans bill through the credit wallet
         let config = parse("[included_allowance_products]\nsynapse = \"ai_credits\"");
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn products_default_to_none() {
+        assert!(parse("").products.is_empty());
+    }
+
+    #[test]
+    fn deserialize_product_model_policy() {
+        let config = parse(
+            r#"
+            [products.keystone]
+            models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-haiku-5-5"]
+            default_model = "anthropic/claude-sonnet-5-5"
+            "#,
+        );
+        let policy = &config.products["keystone"];
+        assert_eq!(
+            policy.models,
+            ["anthropic/claude-sonnet-5-5", "anthropic/claude-haiku-5-5"]
+        );
+        assert_eq!(policy.default_model, "anthropic/claude-sonnet-5-5");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_malformed_product_policy() {
+        let malformed = [
+            // No models
+            "models = []\ndefault_model = \"anthropic/a\"",
+            // Default not listed
+            "models = [\"anthropic/a\"]\ndefault_model = \"anthropic/b\"",
+            // Not provider/model
+            "models = [\"a\"]\ndefault_model = \"a\"",
+            "models = [\"anthropic/\"]\ndefault_model = \"anthropic/\"",
+            // Listed twice
+            "models = [\"anthropic/a\", \"anthropic/a\"]\ndefault_model = \"anthropic/a\"",
+        ];
+        for policy in malformed {
+            let config = parse(&format!("[products.keystone]\n{policy}"));
+            assert!(config.validate().is_err(), "accepted: {policy}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_policy_for_the_gateway_own_product() {
+        // The gateway's own keys see every model their tier allows
+        let config = parse("[products.synapse]\nmodels = [\"anthropic/a\"]\ndefault_model = \"anthropic/a\"");
         assert!(config.validate().is_err());
     }
 

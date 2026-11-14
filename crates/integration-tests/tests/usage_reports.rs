@@ -97,6 +97,7 @@ async fn server(mock: &MockLlm, api: &MockServer, aether: &MockServer) -> TestSe
     config.llm.routing.models = vec![ModelProfileConfig {
         provider: "mock".to_owned(),
         model: "gpt-test".to_owned(),
+        display_name: None,
         context_window: 128_000,
         input_per_mtok: 30.0,
         output_per_mtok: 60.0,
