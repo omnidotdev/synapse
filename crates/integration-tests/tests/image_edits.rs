@@ -298,9 +298,11 @@ async fn managed_edit_for_an_unpriced_model_is_refused_before_the_provider() {
 #[tokio::test]
 async fn byok_edit_uses_the_callers_key_and_is_never_charged() {
     let mock = MockLlm::start().await.unwrap();
+    // Keys are registered by vendor: the image provider configured as `mock`
+    // calls the OpenAI API, so it runs on the caller's `openai` key
     let api = mock_api(creator_key(
         "byok",
-        serde_json::json!([{ "provider": "mock", "decryptedKey": "sk-user-own" }]),
+        serde_json::json!([{ "provider": "openai", "decryptedKey": "sk-user-own" }]),
     ))
     .await;
     let aether = mock_aether().await;

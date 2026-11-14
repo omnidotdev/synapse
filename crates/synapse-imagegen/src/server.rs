@@ -94,7 +94,7 @@ impl Server {
     ) -> crate::error::Result<ImageResponse> {
         let provider = self.provider_for(&request.model)?;
         let mut context = context.clone();
-        resolve_byok_key(&mut context, provider.name())?;
+        resolve_byok_key(&mut context, provider.key_provider())?;
 
         // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
@@ -139,7 +139,7 @@ impl Server {
     ) -> crate::error::Result<ImageResponse> {
         let provider = self.provider_for(&request.model)?;
         let mut context = context.clone();
-        resolve_byok_key(&mut context, provider.name())?;
+        resolve_byok_key(&mut context, provider.key_provider())?;
 
         #[cfg(feature = "billing")]
         let managed = Self::managed_edit_estimate(&context, provider.name(), request)?;
