@@ -44,6 +44,9 @@ pub struct OpenAiRequest {
     /// Stream options (e.g. `include_usage`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<OpenAiStreamOptions>,
+    /// Reasoning effort for reasoning models (e.g. `low`, `medium`, `high`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// `OpenAI` stream options

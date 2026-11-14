@@ -27,6 +27,20 @@ pub struct CompletionParams {
     /// Random seed for deterministic generation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// How much reasoning effort the model spends (`low`, `medium`, `high`,
+    /// ...): the `OpenAI` `reasoning_effort` or the Anthropic
+    /// `output_config.effort`, mapped to whichever the upstream speaks
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Anthropic `thinking` configuration, passed through unchanged to
+    /// Anthropic upstreams
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
+    /// Anthropic `output_config` (e.g. `format`, `task_budget`), passed
+    /// through to Anthropic upstreams with `effort` taken from
+    /// `reasoning_effort`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Internal canonical completion request

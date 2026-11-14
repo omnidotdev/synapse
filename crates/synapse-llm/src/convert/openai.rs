@@ -26,6 +26,9 @@ impl From<OpenAiRequest> for CompletionRequest {
                 frequency_penalty: req.frequency_penalty,
                 presence_penalty: req.presence_penalty,
                 seed: req.seed,
+                reasoning_effort: req.reasoning_effort,
+                thinking: None,
+                output_config: None,
             },
             tools: req.tools.map(|tools| tools.into_iter().map(Into::into).collect()),
             tool_choice: req.tool_choice.and_then(|v| parse_openai_tool_choice(&v)),
@@ -205,7 +208,19 @@ impl From<&CompletionRequest> for OpenAiRequest {
             } else {
                 None
             },
+            reasoning_effort: req.params.reasoning_effort.as_deref().map(openai_reasoning_effort),
         }
+    }
+}
+
+/// An effort level as `OpenAI` names it
+///
+/// Anthropic's top level (`max`) has no `OpenAI` equivalent, so it maps to
+/// `OpenAI`'s highest (`xhigh`); every other level passes through unchanged
+fn openai_reasoning_effort(effort: &str) -> String {
+    match effort {
+        "max" => "xhigh".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -440,5 +455,55 @@ fn parse_finish_reason(s: &str) -> Option<FinishReason> {
         "tool_calls" | "tool_use" => Some(FinishReason::ToolCalls),
         "content_filter" => Some(FinishReason::ContentFilter),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use serde_json::json;
+
+    use crate::protocol::anthropic::AnthropicRequest;
+    use crate::protocol::openai::OpenAiRequest;
+    use crate::types::CompletionRequest;
+
+    fn sent_to_openai(internal: &CompletionRequest) -> serde_json::Value {
+        serde_json::to_value(OpenAiRequest::from(internal)).unwrap()
+    }
+
+    #[test]
+    fn reasoning_effort_passes_through_to_openai() {
+        let inbound: OpenAiRequest = serde_json::from_value(json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "minimal",
+        }))
+        .unwrap();
+
+        assert_eq!(sent_to_openai(&inbound.into())["reasoning_effort"], "minimal");
+    }
+
+    #[test]
+    fn anthropic_effort_reaches_openai_as_reasoning_effort() {
+        let inbound: AnthropicRequest = serde_json::from_value(json!({
+            "model": "gpt-test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {"effort": "max"},
+        }))
+        .unwrap();
+
+        // `max` has no OpenAI equivalent, so it maps to OpenAI's highest
+        assert_eq!(sent_to_openai(&inbound.into())["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn a_request_without_effort_sends_none() {
+        let inbound: OpenAiRequest = serde_json::from_value(json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap();
+
+        assert!(sent_to_openai(&inbound.into()).get("reasoning_effort").is_none());
     }
 }
