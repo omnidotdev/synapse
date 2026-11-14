@@ -44,7 +44,7 @@ impl RequestContext {
 pub struct ExtractMultipart(pub RequestContext, pub TranscriptionRequest);
 
 /// Body limit for audio uploads (32 MiB)
-const BODY_LIMIT_BYTES: usize = 32 << 20;
+pub const BODY_LIMIT_BYTES: usize = 32 << 20;
 
 impl<S> axum::extract::FromRequest<S> for ExtractMultipart
 where
@@ -81,22 +81,10 @@ where
                 .into_response()
         })?;
 
-        // Reassemble the request for multipart parsing
-        let mut rebuilt = http::Request::builder()
-            .method(parts.method.clone())
-            .uri(parts.uri.clone());
-
-        for (key, value) in &parts.headers {
-            rebuilt = rebuilt.header(key, value);
-        }
-
-        let rebuilt = rebuilt.body(Body::from(bytes)).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to rebuild request: {e}"),
-            )
-                .into_response()
-        })?;
+        // Reassemble the request for multipart parsing, keeping its
+        // extensions: the multipart extractor reads the route's body limit
+        // from them, and falls back to axum's 2 MiB default without it
+        let rebuilt = http::Request::from_parts(parts.clone(), Body::from(bytes));
 
         let mut multipart = axum::extract::Multipart::from_request(rebuilt, &())
             .await

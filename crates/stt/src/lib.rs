@@ -14,7 +14,11 @@ mod types;
 
 use std::sync::Arc;
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    routing::post,
+};
 
 pub use error::{Result, SttError};
 use request::ExtractMultipart;
@@ -38,7 +42,10 @@ pub fn build_server(config: &synapse_config::Config) -> anyhow::Result<Arc<Serve
 
 /// Create the endpoint router for STT
 pub fn endpoint_router() -> Router<Arc<Server>> {
-    Router::new().route("/v1/audio/transcriptions", post(transcribe))
+    Router::new().route(
+        "/v1/audio/transcriptions",
+        post(transcribe).layer(DefaultBodyLimit::max(request::BODY_LIMIT_BYTES)),
+    )
 }
 
 /// Handle transcription requests
