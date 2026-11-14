@@ -98,7 +98,11 @@ impl Server {
             // Estimate cost based on character count (~$0.015/1K chars for TTS)
             let char_count = request.input.len();
             #[allow(clippy::cast_precision_loss)]
-            let estimated_cost = self.charge(context, provider.name(), char_count as f64 * 0.000_015);
+            let estimated_cost = self.charge(
+                context,
+                provider.key_provider(),
+                char_count as f64 * SPEECH_USD_PER_CHARACTER,
+            );
             if estimated_cost > 0.0 {
                 self.check_spend(context, estimated_cost).await?;
             }
@@ -115,7 +119,7 @@ impl Server {
             } else {
                 provider_name.to_owned()
             };
-            (pname, model_id, char_count)
+            (pname, model_id, char_count, provider.key_provider())
         };
 
         let response = provider.synthesize(request, context, api_key).await?;
@@ -123,11 +127,27 @@ impl Server {
         // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
         {
-            let (ref pname, ref model_id, char_count) = billing_meta;
+            let (ref pname, ref model_id, char_count, vendor) = billing_meta;
             let request_id = uuid::Uuid::new_v4().to_string();
+            // Marked up by the vendor the provider calls, like its BYOK key
+            let charged_usd = self.charge(context, vendor, f64::from(char_count) * SPEECH_USD_PER_CHARACTER);
             self.record_usage(context, pname, model_id, char_count, &request_id);
-            self.settle_spend(context, pname, model_id, char_count, &request_id)
+            self.settle_spend(context, pname, model_id, charged_usd, &request_id)
                 .await;
+            synapse_core::report_served_usage(
+                &context.parts.extensions,
+                synapse_core::ServedUsage {
+                    modality: synapse_core::Modality::Speech,
+                    provider: pname.clone(),
+                    model: model_id
+                        .split_once('/')
+                        .map_or(model_id.as_str(), |(_, name)| name)
+                        .to_owned(),
+                    input_tokens: char_count,
+                    output_tokens: 0,
+                    charged_usd: synapse_billing::round_up_to_ledger_precision(charged_usd),
+                },
+            );
         }
 
         Ok(response)
@@ -235,7 +255,7 @@ impl Server {
         context: &RequestContext,
         provider_name: &str,
         model_id: &str,
-        char_count: u32,
+        actual_cost: f64,
         request_id: &str,
     ) {
         let Some(ref client) = self.billing_client else {
@@ -249,9 +269,6 @@ impl Server {
         if identity.mode != synapse_core::BillingMode::Managed {
             return;
         }
-
-        // Cost based on character count (~$0.015/1K chars)
-        let actual_cost = self.charge(context, provider_name, f64::from(char_count) * 0.000_015);
 
         if actual_cost <= 0.0 {
             return;
@@ -277,6 +294,10 @@ impl Server {
         }
     }
 }
+
+/// Upstream cost per synthesized character (~$0.015/1K chars)
+#[cfg(feature = "billing")]
+const SPEECH_USD_PER_CHARACTER: f64 = 0.000_015;
 
 /// Builder for constructing the TTS server from configuration
 pub struct TtsServerBuilder<'a> {

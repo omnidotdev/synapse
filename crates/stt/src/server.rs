@@ -98,7 +98,11 @@ impl Server {
             // Estimate cost based on audio size (rough proxy: 1 second ~= 16KB at 16kHz 16-bit mono)
             #[allow(clippy::cast_precision_loss)]
             let estimated_duration_secs = request.audio.len() as f64 / 16_000.0;
-            let estimated_cost = self.charge(context, provider.name(), estimated_duration_secs * 0.0001); // ~$0.006/min
+            let estimated_cost = self.charge(
+                context,
+                provider.key_provider(),
+                estimated_duration_secs * TRANSCRIPTION_USD_PER_SECOND,
+            );
             if estimated_cost > 0.0 {
                 self.check_spend(context, estimated_cost).await?;
             }
@@ -114,7 +118,7 @@ impl Server {
             } else {
                 provider_name.to_owned()
             };
-            (pname, model_id, audio_bytes)
+            (pname, model_id, audio_bytes, provider.key_provider())
         };
 
         let response = provider.transcribe(request, context, api_key).await?;
@@ -122,11 +126,29 @@ impl Server {
         // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
         {
-            let (ref pname, ref model_id, audio_bytes) = billing_meta;
+            let (ref pname, ref model_id, audio_bytes, vendor) = billing_meta;
             let request_id = uuid::Uuid::new_v4().to_string();
+            // Marked up by the vendor the provider calls (`openai` for
+            // Whisper), like its BYOK key, never by its configured name
+            let duration_secs = f64::from(audio_bytes) / 16_000.0;
+            let charged_usd = self.charge(context, vendor, duration_secs * TRANSCRIPTION_USD_PER_SECOND);
             self.record_usage(context, pname, model_id, audio_bytes, &request_id);
-            self.settle_spend(context, pname, model_id, audio_bytes, &request_id)
+            self.settle_spend(context, pname, model_id, charged_usd, &request_id)
                 .await;
+            synapse_core::report_served_usage(
+                &context.parts.extensions,
+                synapse_core::ServedUsage {
+                    modality: synapse_core::Modality::Transcription,
+                    provider: pname.clone(),
+                    model: model_id
+                        .split_once('/')
+                        .map_or(model_id.as_str(), |(_, name)| name)
+                        .to_owned(),
+                    input_tokens: audio_bytes,
+                    output_tokens: 0,
+                    charged_usd: synapse_billing::round_up_to_ledger_precision(charged_usd),
+                },
+            );
         }
 
         Ok(response)
@@ -233,7 +255,7 @@ impl Server {
         context: &RequestContext,
         provider_name: &str,
         model_id: &str,
-        audio_bytes: u32,
+        actual_cost: f64,
         request_id: &str,
     ) {
         let Some(ref client) = self.billing_client else {
@@ -247,10 +269,6 @@ impl Server {
         if identity.mode != synapse_core::BillingMode::Managed {
             return;
         }
-
-        // Cost based on audio duration (~$0.006/min whisper pricing)
-        let duration_secs = f64::from(audio_bytes) / 16_000.0;
-        let actual_cost = self.charge(context, provider_name, duration_secs * 0.0001);
 
         if actual_cost <= 0.0 {
             return;
@@ -276,6 +294,10 @@ impl Server {
         }
     }
 }
+
+/// Upstream cost per second of audio (~$0.006/min, Whisper pricing)
+#[cfg(feature = "billing")]
+const TRANSCRIPTION_USD_PER_SECOND: f64 = 0.0001;
 
 /// Builder for constructing the STT server from configuration
 pub struct SttServerBuilder<'a> {
@@ -585,5 +607,125 @@ mod key_tests {
 
         assert!(response.status().is_client_error(), "{}", response.status());
         assert!(upstream.received_requests().await.unwrap_or_default().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "billing"))]
+mod spend_tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use secrecy::SecretString;
+    use synapse_billing::AetherClient;
+    use synapse_config::FailMode;
+    use synapse_core::{BillingIdentity, BillingMode, MarginPolicy, Modality, ServedUsage, UsageReportSink};
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::Server;
+    use crate::provider::whisper::WhisperProvider;
+    use crate::request::RequestContext;
+    use crate::types::TranscriptionRequest;
+
+    /// The gateway's own product with a 1.3 margin on `openai`, the vendor
+    /// Whisper calls, and none on the provider's configured name
+    fn server(upstream: &MockServer, aether: &MockServer) -> Server {
+        let client = AetherClient::new(
+            reqwest::Url::parse(&format!("{}/", aether.uri())).unwrap(),
+            SecretString::from("aether-key".to_owned()),
+        )
+        .unwrap();
+
+        Server {
+            providers: vec![Box::new(WhisperProvider::new(
+                "whisper".to_owned(),
+                SecretString::from("configured-key".to_owned()),
+                Some(format!("{}/v1", upstream.uri())),
+            ))],
+            usage_recorder: None,
+            billing_client: Some(client),
+            billing_fail_mode: FailMode::Closed,
+            margins: MarginPolicy {
+                default_app_id: "synapse".to_owned(),
+                provider_margins: HashMap::from([("openai".to_owned(), 1.3)]),
+                ..MarginPolicy::default()
+            },
+        }
+    }
+
+    fn context(reports: &Arc<Mutex<Vec<ServedUsage>>>) -> RequestContext {
+        let (mut parts, ()) = http::Request::new(()).into_parts();
+        let sink_reports = Arc::clone(reports);
+        parts.extensions.insert(UsageReportSink::new(move |usage| {
+            sink_reports.lock().unwrap().push(usage);
+        }));
+        RequestContext {
+            parts,
+            api_key: None,
+            client_identity: None,
+            authentication: synapse_core::Authentication::default(),
+            billing_identity: Some(BillingIdentity {
+                app_id: "synapse".to_owned(),
+                entity_type: "user".to_owned(),
+                entity_id: "usr_1".to_owned(),
+                mode: BillingMode::Managed,
+                plan: Some("enterprise".to_owned()),
+            }),
+            provider_keys: HashMap::new(),
+        }
+    }
+
+    // 160,000 bytes is 10 seconds of audio: $0.001 upstream, $0.0013 at the
+    // `openai` margin. Resolved by the configured name `whisper` it was
+    // charged $0.001
+    #[tokio::test]
+    async fn transcription_is_marked_up_by_its_vendor_and_reported_as_charged() {
+        let (upstream, aether) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "hello" })))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/credits/.+/check$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "sufficient": true, "balance": 10.0 })),
+            )
+            .mount(&aether)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/credits/synapse/user/usr_1/deduct"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "success": true })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let request = TranscriptionRequest {
+            audio: vec![0; 160_000],
+            filename: "a.wav".to_owned(),
+            content_type: "audio/wav".to_owned(),
+            model: "whisper/whisper-1".to_owned(),
+            language: None,
+            prompt: None,
+            response_format: None,
+            temperature: None,
+        };
+        server(&upstream, &aether)
+            .transcribe(request, &context(&reports))
+            .await
+            .unwrap();
+
+        let deducts = aether.received_requests().await.unwrap();
+        let deduct = deducts.iter().find(|r| r.url.path().ends_with("/deduct")).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&deduct.body).unwrap();
+        assert_eq!(body["amount"], 0.0013);
+        assert_eq!(body["referenceType"], "transcription");
+
+        let reports = std::mem::take(&mut *reports.lock().unwrap());
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].modality, Modality::Transcription);
+        assert_eq!(reports[0].model, "whisper-1");
+        assert_eq!(reports[0].input_tokens, 160_000);
+        assert!((reports[0].charged_usd - 0.0013).abs() < 1e-12);
     }
 }

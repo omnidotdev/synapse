@@ -99,7 +99,7 @@ impl Server {
         // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
         {
-            let estimated_cost = self.charge(&context, provider.name(), Self::estimate_image_cost(request));
+            let estimated_cost = self.charge(&context, provider.key_provider(), Self::estimate_image_cost(request));
             if estimated_cost > 0.0 {
                 self.check_spend(&context, estimated_cost).await?;
             }
@@ -113,14 +113,16 @@ impl Server {
             let base_cost = Self::generation_cost(request, &response);
             let billed = Billed {
                 provider_name: provider.name(),
+                vendor: provider.key_provider(),
                 model: &request.model,
                 images: request.n,
                 base_cost,
-                reference_type: "image_generation",
+                modality: synapse_core::Modality::ImageGeneration,
                 request_id: uuid::Uuid::new_v4().to_string(),
             };
             self.record_usage(&context, &billed);
             self.settle_spend(&context, &billed).await;
+            self.report_usage(&context, &billed);
         }
 
         Ok(response)
@@ -145,7 +147,7 @@ impl Server {
         let managed = Self::managed_edit_estimate(&context, provider.name(), request)?;
         #[cfg(feature = "billing")]
         if let Some((_, estimate)) = managed {
-            self.check_spend(&context, self.charge(&context, provider.name(), estimate))
+            self.check_spend(&context, self.charge(&context, provider.key_provider(), estimate))
                 .await?;
         }
 
@@ -158,14 +160,16 @@ impl Server {
             });
             let billed = Billed {
                 provider_name: provider.name(),
+                vendor: provider.key_provider(),
                 model: &request.model,
                 images: request.n,
                 base_cost,
-                reference_type: "image_edit",
+                modality: synapse_core::Modality::ImageEdit,
                 request_id: uuid::Uuid::new_v4().to_string(),
             };
             self.record_usage(&context, &billed);
             self.settle_spend(&context, &billed).await;
+            self.report_usage(&context, &billed);
         }
 
         Ok(response)
@@ -333,7 +337,7 @@ impl Server {
             provider: billed.provider_name.to_owned(),
             input_tokens: if is_byok { 0 } else { billed.images },
             output_tokens: 0,
-            estimated_cost_usd: self.charge(context, billed.provider_name, billed.base_cost),
+            estimated_cost_usd: self.charge(context, billed.vendor, billed.base_cost),
             idempotency_key: billed.request_id.clone(),
         });
     }
@@ -354,7 +358,7 @@ impl Server {
             return;
         }
 
-        let actual_cost = self.charge(context, billed.provider_name, billed.base_cost);
+        let actual_cost = self.charge(context, billed.vendor, billed.base_cost);
 
         if actual_cost <= 0.0 {
             return;
@@ -364,7 +368,7 @@ impl Server {
             amount_usd: actual_cost,
             description: format!("{}/{}", billed.provider_name, bare_model(billed.model)),
             idempotency_key: billed.request_id.clone(),
-            reference_type: billed.reference_type.to_owned(),
+            reference_type: billed.modality.as_str().to_owned(),
         };
 
         if let Err(e) = client
@@ -375,10 +379,31 @@ impl Server {
                 error = %e,
                 entity_id = %identity.entity_id,
                 cost = actual_cost,
-                reference_type = billed.reference_type,
+                reference_type = billed.modality.as_str(),
                 "failed to charge usage after image request"
             );
         }
+    }
+
+    /// Report a served request to synapse-api for dashboard charts and
+    /// reconciliation, carrying exactly what it was charged
+    #[cfg(feature = "billing")]
+    fn report_usage(&self, context: &RequestContext, billed: &Billed<'_>) {
+        synapse_core::report_served_usage(
+            &context.parts.extensions,
+            synapse_core::ServedUsage {
+                modality: billed.modality,
+                provider: billed.provider_name.to_owned(),
+                model: bare_model(billed.model).to_owned(),
+                input_tokens: billed.images,
+                output_tokens: 0,
+                charged_usd: synapse_billing::round_up_to_ledger_precision(self.charge(
+                    context,
+                    billed.vendor,
+                    billed.base_cost,
+                )),
+            },
+        );
     }
 }
 
@@ -386,13 +411,16 @@ impl Server {
 #[cfg(feature = "billing")]
 struct Billed<'a> {
     provider_name: &'a str,
+    /// Vendor the provider calls, which its margin is resolved by (like its
+    /// BYOK key)
+    vendor: &'static str,
     model: &'a str,
     /// Images requested
     images: u32,
     /// Upstream cost in USD, before the product margin
     base_cost: f64,
-    /// Kind of usage on the charge (e.g. `image_edit`)
-    reference_type: &'static str,
+    /// Kind of usage, also the charge's reference type (e.g. `image_edit`)
+    modality: synapse_core::Modality,
     request_id: String,
 }
 
@@ -402,15 +430,13 @@ fn bare_model(model: &str) -> &str {
     model.split_once('/').map_or(model, |(_, name)| name)
 }
 
-/// Header that clients use to forward their own provider API key
-const PROVIDER_KEY_HEADER: &str = "x-provider-api-key";
-
 /// Point a BYOK request at the caller's own provider key
 ///
 /// A BYOK request is never charged, so it must never be served on Omni's
-/// key: it uses the key registered for this provider (or forwarded in the
-/// provider-key header) and is refused when there is none. Managed and
-/// unauthenticated requests keep the provider's configured key
+/// key: it uses the key registered for this provider and is refused when
+/// there is none. A key forwarded in a request header is ignored, as on every
+/// other endpoint. Managed and unauthenticated requests keep the provider's
+/// configured key
 fn resolve_byok_key(context: &mut RequestContext, provider_name: &str) -> crate::error::Result<()> {
     let is_byok = context
         .billing_identity
@@ -420,15 +446,7 @@ fn resolve_byok_key(context: &mut RequestContext, provider_name: &str) -> crate:
         return Ok(());
     }
 
-    let key = context.provider_keys.get(provider_name).cloned().or_else(|| {
-        context
-            .headers()
-            .get(PROVIDER_KEY_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| SecretString::from(value.to_owned()))
-    });
-
-    let key = key.ok_or_else(|| {
+    let key = context.provider_keys.get(provider_name).cloned().ok_or_else(|| {
         ImageGenError::InvalidRequest(format!(
             "no BYOK key registered for provider '{provider_name}'. \
              Register one via setProviderKey or use a managed-mode API key"
@@ -697,6 +715,22 @@ mod spend_tests {
             .generate(&request(), &context("creator", BillingMode::Byok))
             .await
             .unwrap_err();
+
+        assert!(matches!(err, ImageGenError::InvalidRequest(_)));
+    }
+
+    /// BYOK runs only on the key registered for the provider, as on every
+    /// other endpoint: a key forwarded in a request header is ignored
+    #[tokio::test]
+    async fn byok_generation_ignores_a_provider_key_header() {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 0).await;
+
+        let mut ctx = context("creator", BillingMode::Byok);
+        ctx.parts
+            .headers
+            .insert("x-provider-api-key", axum::http::HeaderValue::from_static("sk-header"));
+        let err = server(&provider, &aether).generate(&request(), &ctx).await.unwrap_err();
 
         assert!(matches!(err, ImageGenError::InvalidRequest(_)));
     }

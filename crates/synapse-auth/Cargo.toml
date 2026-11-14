@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 http.workspace = true
+jiff.workspace = true
 mini-moka.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 secrecy.workspace = true
@@ -20,8 +21,13 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing.workspace = true
 url.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 synapse-core.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
 
 [lints]
 workspace = true

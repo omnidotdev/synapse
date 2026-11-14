@@ -74,11 +74,13 @@ pub async fn auth_middleware(
                 }
             }
 
+            // Every modality reports what it served through this sink, bound
+            // to the key the request authenticated with
+            if let Some(reporter) = usage_reporter {
+                request.extensions_mut().insert(reporter.sink_for(Arc::clone(&result)));
+            }
             synapse_auth::insert_resolved_key(request.extensions_mut(), result);
             request.extensions_mut().insert(billing_identity);
-            if let Some(reporter) = usage_reporter {
-                request.extensions_mut().insert(reporter);
-            }
             next.run(request).await
         }
         Err(e) => {
