@@ -41,6 +41,7 @@ async fn llm_state(provider: &MockServer, aether: &MockServer) -> LlmState {
     config.routing.models = vec![ModelProfileConfig {
         provider: "anthropic".to_owned(),
         model: MODEL.to_owned(),
+        display_name: None,
         context_window: 200_000,
         input_per_mtok: 1000.0,
         output_per_mtok: 2000.0,

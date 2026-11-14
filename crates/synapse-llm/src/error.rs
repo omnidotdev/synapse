@@ -51,6 +51,10 @@ pub enum LlmError {
     #[error("model {model} is not available with managed billing; bring your own provider key to use it")]
     ModelNotPriced { model: String },
 
+    /// A product-scoped key named a model outside its product's policy
+    #[error("model {model} is not available for this API key; GET /v1/models lists the models it can use")]
+    ModelNotAllowed { model: String },
+
     /// Billing service is unavailable and fail-closed mode is configured
     #[error("billing service unavailable")]
     BillingUnavailable,
@@ -84,7 +88,9 @@ impl HttpError for LlmError {
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Streaming(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } => StatusCode::BAD_REQUEST,
+            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } | Self::ModelNotAllowed { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::InsufficientCredits { .. } | Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
@@ -96,7 +102,9 @@ impl HttpError for LlmError {
             Self::ModelNotFound { .. } | Self::ProviderNotFound { .. } => "not_found_error",
             Self::Upstream(_) => "upstream_error",
             Self::Streaming(_) => "streaming_error",
-            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } => "invalid_request_error",
+            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } | Self::ModelNotAllowed { .. } => {
+                "invalid_request_error"
+            }
             Self::Unauthorized => "authentication_error",
             Self::RateLimited { .. } => "rate_limit_error",
             Self::InsufficientCredits { .. } => "insufficient_credits_error",

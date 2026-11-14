@@ -260,6 +260,10 @@ pub struct ModelProfileConfig {
     pub provider: String,
     /// Model identifier
     pub model: String,
+    /// Human-readable name model pickers show (e.g. "Claude Sonnet 5.5").
+    /// Derived from the model id when unset
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Context window size in tokens
     #[serde(default)]
     pub context_window: u32,

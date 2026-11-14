@@ -52,6 +52,7 @@ fn profile(provider: &str, model: &str, input_per_mtok: f64, output_per_mtok: f6
     ModelProfileConfig {
         provider: provider.to_owned(),
         model: model.to_owned(),
+        display_name: None,
         context_window: 200_000,
         input_per_mtok,
         output_per_mtok,

@@ -109,6 +109,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "anthropic".to_owned(),
                 model: "claude-sonnet".to_owned(),
+                display_name: None,
                 context_window: 200_000,
                 input_per_mtok: 3.0,
                 output_per_mtok: 15.0,
@@ -119,6 +120,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "openai".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
+                display_name: None,
                 context_window: 128_000,
                 input_per_mtok: 0.15,
                 output_per_mtok: 0.60,

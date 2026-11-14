@@ -200,6 +200,38 @@ components:
           type: integer
         owned_by:
           type: string
+        synapse:
+          $ref: "#/components/schemas/SynapseModelInfo"
+
+    SynapseModelInfo:
+      type: object
+      description: >-
+        What Synapse knows about the model for the calling key, so model
+        pickers never hardcode names, defaults, or prices
+      required: [display_name, default, context_window, credits_per_mtok]
+      properties:
+        display_name:
+          type: string
+          description: Human-readable name for model pickers
+        default:
+          type: boolean
+          description: Whether this is the key's default model (what `auto` resolves to)
+        context_window:
+          type: [integer, "null"]
+          description: Context window in tokens, when known
+        credits_per_mtok:
+          description: >-
+            Retail price in credits ($0.01 each) per million tokens, margin
+            included. Null when the key is not billed for the model
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [input, output]
+              properties:
+                input:
+                  type: number
+                output:
+                  type: number
 
     # -- Anthropic --
     AnthropicMessage:
@@ -635,7 +667,10 @@ paths:
   /v1/models:
     get:
       operationId: listModels
-      summary: List available models
+      summary: List the models the calling key can use
+      description: >-
+        A product-scoped key lists exactly its product's models with its
+        default flagged; any other key lists every model the gateway serves
       tags: [LLM]
       responses:
         "200":

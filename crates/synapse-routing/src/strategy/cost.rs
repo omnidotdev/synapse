@@ -105,6 +105,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "expensive".to_owned(),
                 model: "big-model".to_owned(),
+                display_name: None,
                 context_window: 200_000,
                 input_per_mtok: 10.0,
                 output_per_mtok: 30.0,
@@ -115,6 +116,7 @@ mod tests {
             ModelProfileConfig {
                 provider: "cheap".to_owned(),
                 model: "small-model".to_owned(),
+                display_name: None,
                 context_window: 32_000,
                 input_per_mtok: 0.1,
                 output_per_mtok: 0.3,
