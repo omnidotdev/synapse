@@ -462,6 +462,74 @@ components:
                 type: string
               revised_prompt:
                 type: string
+        usage:
+          $ref: "#/components/schemas/ImageUsage"
+
+    ImageUsage:
+      type: object
+      description: Token usage reported by GPT Image models
+      properties:
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        input_tokens_details:
+          $ref: "#/components/schemas/ImageTokenDetails"
+        output_tokens_details:
+          $ref: "#/components/schemas/ImageTokenDetails"
+
+    ImageTokenDetails:
+      type: object
+      properties:
+        image_tokens:
+          type: integer
+        text_tokens:
+          type: integer
+
+    ImageEditRequest:
+      type: object
+      required: [model, prompt, "image[]"]
+      description: >-
+        Every part is forwarded to the provider unchanged (only the provider
+        prefix is dropped from `model`), so other provider fields such as
+        `background` or `output_format` pass through. The whole form is
+        limited to 64 MiB. Streaming is not supported
+      properties:
+        model:
+          type: string
+          description: >-
+            Provider-prefixed model id (e.g. `openai/gpt-image-1.5`). Managed
+            requests accept `gpt-image-1.5` and `gpt-image-1-mini`
+        prompt:
+          type: string
+        "image[]":
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Reference images (`image` is accepted as an alias)
+          items:
+            type: string
+            format: binary
+        mask:
+          type: string
+          format: binary
+          description: Optional mask; transparent areas mark where to edit
+        quality:
+          type: string
+          enum: [low, medium, high, auto]
+        size:
+          type: string
+          description: e.g. `1024x1024`, `1024x1536`, `1536x1024`, or `auto`
+        n:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 1
+        input_fidelity:
+          type: string
+          enum: [high, low]
 
     # -- STT --
     TranscriptionResponse:
@@ -653,6 +721,63 @@ paths:
                 $ref: "#/components/schemas/ImageResponse"
         "401":
           description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+
+  /v1/images/edits:
+    post:
+      operationId: createImageEdit
+      summary: Generate images from reference images and a prompt
+      description: >-
+        Managed requests are priced from the model's published token rates,
+        checked against credits (or the product's included allowance) before
+        the provider is called, and charged from the token usage the provider
+        reports. BYOK requests use the caller's provider key and are never
+        charged
+      tags: [Image Generation]
+      parameters:
+        - $ref: "#/components/parameters/ProviderApiKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ImageEditRequest"
+            encoding:
+              "image[]":
+                contentType: image/png, image/jpeg, image/webp
+      responses:
+        "200":
+          description: Generated image(s)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageResponse"
+        "400":
+          description: >-
+            Invalid form (missing field, 0 or more than 16 images, unsupported
+            quality or input fidelity), an unpriced model on a managed key, or
+            a BYOK key with no provider key registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+        "401":
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+        "402":
+          description: Insufficient credits, or the included AI allowance is used up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiError"
+        "413":
+          description: Form exceeds 64 MiB
           content:
             application/json:
               schema:

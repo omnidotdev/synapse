@@ -13,8 +13,8 @@ billing = ["dep:synapse-billing", "dep:uuid", "dep:tokio"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-axum.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+axum = { workspace = true, features = ["multipart"] }
+reqwest = { workspace = true, features = ["json", "multipart"] }
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

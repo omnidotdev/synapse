@@ -88,6 +88,37 @@ impl ConfigBuilder {
         self
     }
 
+    /// Enable Aether billing against a mock, in hybrid mode with the 2.0
+    /// default product margin
+    pub fn with_billing(mut self, billing_url: &str) -> Self {
+        self.config.billing = Some(
+            serde_json::from_value(serde_json::json!({
+                "enabled": true,
+                "billing_url": format!("{}/", billing_url.trim_end_matches('/')),
+                "service_api_key": "aether-key",
+                "app_id": "synapse",
+                "mode": "hybrid",
+                "fail_mode": "closed",
+                "managed_providers": { "mock": { "api_key": "test-key" } }
+            }))
+            .expect("valid billing config"),
+        );
+        self
+    }
+
+    /// Enable API key auth against a mock synapse-api
+    pub fn with_auth(mut self, api_url: &str) -> Self {
+        self.config.auth = Some(
+            serde_json::from_value(serde_json::json!({
+                "enabled": true,
+                "api_url": api_url,
+                "gateway_secret": "gateway-secret"
+            }))
+            .expect("valid auth config"),
+        );
+        self
+    }
+
     /// Set CORS configuration
     pub fn with_cors(mut self, config: CorsConfig) -> Self {
         self.config.server.cors = Some(config);

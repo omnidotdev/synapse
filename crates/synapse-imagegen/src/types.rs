@@ -65,4 +65,38 @@ pub struct ImageResponse {
     pub created: u64,
     /// Array of generated image results
     pub data: Vec<ImageData>,
+    /// Token usage reported by GPT Image models
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ImageUsage>,
+}
+
+/// Token usage for a GPT Image request, as reported by `OpenAI`
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ImageUsage {
+    /// Input tokens (prompt text and input images)
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Input plus output tokens
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Input tokens by modality
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<TokenDetails>,
+    /// Output tokens by modality
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<TokenDetails>,
+}
+
+/// Token counts split by modality
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TokenDetails {
+    /// Image tokens
+    #[serde(default)]
+    pub image_tokens: u64,
+    /// Text tokens
+    #[serde(default)]
+    pub text_tokens: u64,
 }
