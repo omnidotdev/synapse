@@ -16,7 +16,7 @@ use crate::error::LlmError;
 use crate::health::ProviderHealthTracker;
 use crate::provider::Provider;
 use crate::routing::ModelRouter;
-use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
+use crate::types::{CompletionRequest, CompletionResponse, StreamEvent, Usage};
 use synapse_core::MarginPolicy;
 
 /// Virtual model names that trigger smart routing
@@ -43,6 +43,17 @@ impl Served {
             model: model.to_owned(),
         }
     }
+}
+
+/// An attempt whose response was thrown away after its provider was paid
+///
+/// A cascade discards the cheap model's answer when it escalates, but the
+/// upstream cost of producing it was incurred, so its usage is billed at its
+/// own model's price alongside the attempt that served the request
+#[derive(Debug, Clone)]
+pub(crate) struct Discarded {
+    pub(crate) served: Served,
+    pub(crate) usage: Usage,
 }
 
 /// Shared state for LLM route handlers
@@ -103,8 +114,8 @@ impl LlmState {
         // model is refused here)
         #[cfg(feature = "billing")]
         {
-            let candidates = self.serving_candidates(&provider_name, &model_id, explicit_provider, false);
-            if let Some(cost) = self.estimate_request_cost(&context, &candidates, &request)? {
+            let stages = self.serving_candidates(&provider_name, &model_id, explicit_provider, false);
+            if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
                 self.check_spend(&context, cost).await?;
             }
         }
@@ -130,8 +141,10 @@ impl LlmState {
                             "serving cached response"
                         );
                         // Bill on the model that produced the cached response
-                        self.record_served_usage(&context, &cached.provider, &cached.model, &response)
-                            .await;
+                        if let Some(ref usage) = response.usage {
+                            self.record_served_usage(&context, &cached.provider, &cached.model, usage)
+                                .await;
+                        }
                         return Ok(response);
                     }
                     Err(e) => {
@@ -156,8 +169,10 @@ impl LlmState {
                 .await?
         };
 
-        self.record_served_usage(&context, &served.provider, &served.model, &response)
-            .await;
+        if let Some(ref usage) = response.usage {
+            self.record_served_usage(&context, &served.provider, &served.model, usage)
+                .await;
+        }
 
         // Store successful response in cache. A response without usage is
         // never stored, since a hit on it could not be billed
@@ -182,21 +197,11 @@ impl LlmState {
 
     /// Meter, charge, and report a served completion's usage
     ///
-    /// Shared by live responses and cache hits so both are billed the same
-    /// way: usage events, the managed spend settlement (credit wallet or
-    /// included allowance, each with a fresh idempotency key), and the
-    /// dashboard usage report
-    async fn record_served_usage(
-        &self,
-        context: &RequestContext,
-        provider_name: &str,
-        model_id: &str,
-        response: &CompletionResponse,
-    ) {
-        let Some(ref usage) = response.usage else {
-            return;
-        };
-
+    /// Shared by live responses, cache hits, and discarded cascade attempts so
+    /// all are billed the same way: usage events, the managed spend settlement
+    /// (credit wallet or included allowance, each with a fresh idempotency
+    /// key), and the dashboard usage report
+    async fn record_served_usage(&self, context: &RequestContext, provider_name: &str, model_id: &str, usage: &Usage) {
         // Record usage for billing
         #[cfg(feature = "billing")]
         if let Some(ref recorder) = self.inner.usage_recorder {
@@ -287,12 +292,13 @@ impl LlmState {
 
         // Pre-request spend check for managed billing (the credit wallet, or
         // the product's included allowance), priced on the most expensive
-        // model that may serve the request (a managed request for an unpriced
-        // model is refused here)
+        // model that may serve each attempt, summed over the attempts a
+        // cascade may bill (a managed request for an unpriced model is
+        // refused here)
         #[cfg(feature = "billing")]
         {
-            let candidates = self.serving_candidates(&provider_name, &model_id, explicit_provider, cascade);
-            if let Some(cost) = self.estimate_request_cost(&context, &candidates, &request)? {
+            let stages = self.serving_candidates(&provider_name, &model_id, explicit_provider, cascade);
+            if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
                 self.check_spend(&context, cost).await?;
             }
         }
@@ -304,15 +310,23 @@ impl LlmState {
             self.complete_stream_direct(&request, &context, &provider_name, &model_id, &provider)
                 .await?
         } else if cascade {
-            self.complete_stream_with_cascade(
-                &request,
-                &context,
-                &provider_name,
-                &model_id,
-                &provider,
-                &self.inner.routing_config.cascade,
-            )
-            .await?
+            let (served, stream, discarded) = self
+                .complete_stream_with_cascade(
+                    &request,
+                    &context,
+                    &provider_name,
+                    &model_id,
+                    &provider,
+                    &self.inner.routing_config.cascade,
+                )
+                .await?;
+            // The escalated stream is metered below; the discarded first
+            // attempt was paid for upstream, so it is billed at its own price
+            if let Some(Discarded { served, usage }) = discarded {
+                self.record_served_usage(&context, &served.provider, &served.model, &usage)
+                    .await;
+            }
+            (served, stream)
         } else {
             self.complete_stream_with_failover(&request, &context, &provider_name, &model_id, &provider)
                 .await?
@@ -969,6 +983,23 @@ impl LlmState {
         model_id: &str,
         provider: &Arc<dyn Provider>,
     ) -> Result<(Served, EventStream), LlmError> {
+        self.complete_stream_with_failover_excluding(request, context, provider_name, model_id, provider, None)
+            .await
+    }
+
+    /// Streaming failover that never fails over to `exclude`
+    ///
+    /// A cascade escalation must not fall back to the model whose answer it
+    /// just rejected, which would pay for the same cheap answer twice
+    async fn complete_stream_with_failover_excluding(
+        &self,
+        request: &CompletionRequest,
+        context: &RequestContext,
+        provider_name: &str,
+        model_id: &str,
+        provider: &Arc<dyn Provider>,
+        exclude: Option<&Served>,
+    ) -> Result<(Served, EventStream), LlmError> {
         // Try primary provider
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
@@ -1013,7 +1044,8 @@ impl LlmState {
                 let mut last_error = e;
 
                 for (alt_provider, alt_model) in self.failover_alternatives(provider_name, model_id) {
-                    if !self.inner.health.is_available(&alt_provider)
+                    if exclude.is_some_and(|ex| ex.provider == alt_provider && ex.model == alt_model)
+                        || !self.inner.health.is_available(&alt_provider)
                         || !self.can_bill(context, &alt_provider, &alt_model)
                     {
                         continue;
@@ -1065,7 +1097,11 @@ impl LlmState {
     /// Execute a streaming cascade: buffer initial model's response, evaluate
     /// confidence, then either replay the buffer or re-request with the
     /// escalation model
-    #[allow(clippy::cognitive_complexity)]
+    ///
+    /// On escalation the initial attempt's usage is returned as `Discarded`
+    /// so the caller bills it; the returned stream carries only the usage of
+    /// the attempt that served the request
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     pub(crate) async fn complete_stream_with_cascade(
         &self,
         request: &CompletionRequest,
@@ -1074,7 +1110,7 @@ impl LlmState {
         model_id: &str,
         provider: &Arc<dyn Provider>,
         cascade_config: &synapse_config::CascadeConfig,
-    ) -> Result<(Served, EventStream), LlmError> {
+    ) -> Result<(Served, EventStream, Option<Discarded>), LlmError> {
         // Get the escalation model from the routing decision's alternatives
         let escalation = self.resolve_escalation_model(cascade_config)?;
 
@@ -1143,7 +1179,7 @@ impl LlmState {
 
         // If committed early (buffer limit or timeout), replay buffer + remaining stream
         if committed {
-            return Ok((initial, Box::pin(replay(buffered_events).chain(stream))));
+            return Ok((initial, Box::pin(replay(buffered_events).chain(stream)), None));
         }
 
         // Estimate input tokens for confidence check
@@ -1161,7 +1197,7 @@ impl LlmState {
                 model = %initial.model,
                 "cascade: initial model response is confident, replaying buffer"
             );
-            return Ok((initial, Box::pin(replay(buffered_events))));
+            return Ok((initial, Box::pin(replay(buffered_events)), None));
         }
 
         // Not confident, escalate to stronger model
@@ -1181,7 +1217,7 @@ impl LlmState {
                 escalation_model = %esc_model_id,
                 "cascade: escalation model is unpriced for a managed request, replaying buffer"
             );
-            return Ok((initial, Box::pin(replay(buffered_events))));
+            return Ok((initial, Box::pin(replay(buffered_events)), None));
         }
 
         let esc_provider = self
@@ -1202,12 +1238,42 @@ impl LlmState {
                     error = %e,
                     "cascade: no usable key for the escalation provider, replaying buffer"
                 );
-                return Ok((initial, Box::pin(replay(buffered_events))));
+                return Ok((initial, Box::pin(replay(buffered_events)), None));
             }
         };
 
-        self.complete_stream_with_failover(request, &esc_context, esc_provider_name, esc_model_id, esc_provider)
+        match self
+            .complete_stream_with_failover_excluding(
+                request,
+                &esc_context,
+                esc_provider_name,
+                esc_model_id,
+                esc_provider,
+                Some(&initial),
+            )
             .await
+        {
+            Ok((escalated, stream)) => {
+                let discarded = buffered_events.into_iter().find_map(|event| match event {
+                    StreamEvent::Usage(usage) => Some(Discarded {
+                        served: initial.clone(),
+                        usage,
+                    }),
+                    _ => None,
+                });
+                Ok((escalated, stream, discarded))
+            }
+            // The initial answer is complete and already paid for, so a failed
+            // escalation serves it rather than surface an error
+            Err(e) => {
+                tracing::warn!(
+                    escalation_provider = %esc_provider_name,
+                    error = %e,
+                    "cascade: escalation failed, replaying buffer"
+                );
+                Ok((initial, Box::pin(replay(buffered_events)), None))
+            }
+        }
     }
 
     /// Resolve the escalation model for cascade routing
@@ -1298,9 +1364,13 @@ impl LlmState {
             .collect()
     }
 
-    /// Every provider/model pair that may serve a request: the resolved pair
-    /// first, then the failover alternatives it can reach, and for a cascade
-    /// the escalation model and its alternatives
+    /// The billed attempts a request may make, each with every provider/model
+    /// pair that may serve it
+    ///
+    /// The first stage is the resolved pair followed by the failover
+    /// alternatives it can reach. A cascade adds a second stage, the
+    /// escalation model and its alternatives, since an escalated request
+    /// bills both its discarded first attempt and the escalation
     #[cfg(feature = "billing")]
     fn serving_candidates(
         &self,
@@ -1308,19 +1378,21 @@ impl LlmState {
         model_id: &str,
         explicit_provider: bool,
         cascade: bool,
-    ) -> Vec<(String, String)> {
-        let mut candidates = vec![(provider_name.to_owned(), model_id.to_owned())];
+    ) -> Vec<Vec<(String, String)>> {
+        let mut initial = vec![(provider_name.to_owned(), model_id.to_owned())];
         if explicit_provider {
-            return candidates;
+            return vec![initial];
         }
-        candidates.extend(self.failover_alternatives(provider_name, model_id));
+        initial.extend(self.failover_alternatives(provider_name, model_id));
+        let mut stages = vec![initial];
         if cascade
             && let Ok((esc_provider, esc_model)) = self.resolve_escalation_model(&self.inner.routing_config.cascade)
         {
-            candidates.extend(self.failover_alternatives(&esc_provider, &esc_model));
-            candidates.push((esc_provider, esc_model));
+            let mut escalation = vec![(esc_provider.clone(), esc_model.clone())];
+            escalation.extend(self.failover_alternatives(&esc_provider, &esc_model));
+            stages.push(escalation);
         }
-        candidates
+        stages
     }
 
     /// Whether a request served by `provider_name`/`model_id` can be billed
@@ -1444,7 +1516,7 @@ impl LlmState {
     fn estimate_request_cost(
         &self,
         context: &RequestContext,
-        candidates: &[(String, String)],
+        stages: &[Vec<(String, String)>],
         request: &CompletionRequest,
     ) -> Result<Option<f64>, LlmError> {
         let Some(identity) = context.billing_identity.as_ref() else {
@@ -1475,18 +1547,33 @@ impl LlmState {
             )
         };
 
-        // The resolved model must be priced. An unpriced alternative is never
-        // served to a managed request (see `can_bill`), so it is left out
-        let Some(((provider_name, model_id), alternatives)) = candidates.split_first() else {
+        // The resolved model must be priced. An unpriced alternative or
+        // escalation is never served to a managed request (see `can_bill`),
+        // so it is left out
+        let Some(((provider_name, model_id), alternatives)) = stages.first().and_then(|stage| stage.split_first())
+        else {
             return Ok(None);
         };
         let primary = cost(provider_name, model_id)?;
-        let worst = alternatives
+        let first_attempt = alternatives
             .iter()
             .filter_map(|(provider_name, model_id)| cost(provider_name, model_id).ok())
             .fold(primary, f64::max);
 
-        Ok(Some(worst))
+        // Each later attempt (a cascade escalation) is billed on top of the
+        // first, at the most expensive model that may serve it
+        let later_attempts: f64 = stages
+            .iter()
+            .skip(1)
+            .map(|stage| {
+                stage
+                    .iter()
+                    .filter_map(|(provider_name, model_id)| cost(provider_name, model_id).ok())
+                    .fold(0.0, f64::max)
+            })
+            .sum();
+
+        Ok(Some(first_attempt + later_attempts))
     }
 
     /// Check that the estimated cost is covered: by the credit wallet, or by
