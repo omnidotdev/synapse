@@ -16,7 +16,7 @@ use crate::error::LlmError;
 use crate::health::ProviderHealthTracker;
 use crate::provider::Provider;
 use crate::routing::ModelRouter;
-use crate::types::{CompletionRequest, CompletionResponse, StreamEvent, Usage};
+use crate::types::{CompletionRequest, CompletionResponse, RequestCost, StreamEvent, Usage};
 use synapse_core::MarginPolicy;
 
 /// Virtual model names that trigger smart routing
@@ -134,16 +134,17 @@ impl LlmState {
         {
             match cache.get(key).await {
                 Ok(Some(cached)) => match serde_json::from_str::<CompletionResponse>(&cached.body) {
-                    Ok(response) => {
+                    Ok(mut response) => {
                         tracing::info!(
                             provider = %cached.provider,
                             model = %cached.model,
                             "serving cached response"
                         );
                         // Bill on the model that produced the cached response
-                        if let Some(ref usage) = response.usage {
+                        if let Some(ref mut usage) = response.usage {
                             self.record_served_usage(&context, &cached.provider, &cached.model, usage)
                                 .await;
+                            usage.cost = self.request_cost(&context, &cached.provider, &cached.model, usage);
                         }
                         return Ok(response);
                     }
@@ -161,7 +162,7 @@ impl LlmState {
         // Skip failover when the user explicitly selected a provider (e.g.
         // "nvidia/moonshotai/kimi-k2.5"), surface the error instead of
         // silently routing to a different model
-        let (served, response) = if explicit_provider {
+        let (served, mut response) = if explicit_provider {
             self.complete_direct(&request, &context, &provider_name, &model_id, &provider)
                 .await?
         } else {
@@ -169,9 +170,10 @@ impl LlmState {
                 .await?
         };
 
-        if let Some(ref usage) = response.usage {
+        if let Some(ref mut usage) = response.usage {
             self.record_served_usage(&context, &served.provider, &served.model, usage)
                 .await;
+            usage.cost = self.request_cost(&context, &served.provider, &served.model, usage);
         }
 
         // Store successful response in cache. A response without usage is
@@ -240,6 +242,62 @@ impl LlmState {
         );
     }
 
+    /// What a served attempt cost the caller, for reporting on its usage
+    ///
+    /// `None` when the request is not billed (no billing identity), or its
+    /// model cannot be priced. A BYOK request costs the caller nothing here:
+    /// they pay their provider directly
+    #[cfg_attr(not(feature = "billing"), allow(clippy::unused_self))]
+    fn request_cost(
+        &self,
+        context: &RequestContext,
+        provider_name: &str,
+        model_id: &str,
+        usage: &Usage,
+    ) -> Option<RequestCost> {
+        #[cfg(feature = "billing")]
+        {
+            attempt_cost(
+                &self.inner.model_registry,
+                &self.inner.margins,
+                context,
+                provider_name,
+                model_id,
+                usage,
+            )
+        }
+
+        #[cfg(not(feature = "billing"))]
+        {
+            let _ = (context, provider_name, model_id, usage);
+            None
+        }
+    }
+
+    /// Set the request's cost on the stream's usage event, including the
+    /// cost of any attempt billed before the one serving the stream
+    fn with_reported_cost(
+        &self,
+        stream: EventStream,
+        context: &RequestContext,
+        served: &Served,
+        prior_cost: Option<RequestCost>,
+    ) -> EventStream {
+        let this = self.clone();
+        let ctx = context.clone();
+        let served = served.clone();
+        Box::pin(stream.map(move |mut item| {
+            if let Ok(StreamEvent::Usage(ref mut usage)) = item {
+                let cost = this.request_cost(&ctx, &served.provider, &served.model, usage);
+                usage.cost = match (cost, prior_cost) {
+                    (Some(cost), Some(prior)) => Some(prior.plus(cost)),
+                    (cost, prior) => cost.or(prior),
+                };
+            }
+            item
+        }))
+    }
+
     /// Cache key for a request, when the response cache applies to it
     ///
     /// `None` unless the cache is configured, the caller opted in, the
@@ -303,6 +361,10 @@ impl LlmState {
             }
         }
 
+        // What the request cost before the attempt that serves the stream
+        // (a discarded cascade attempt), added to the cost it reports
+        let mut prior_cost: Option<RequestCost> = None;
+
         // Skip failover/cascade when the user explicitly selected a
         // provider, surface the error instead of silently routing to a
         // different model
@@ -325,12 +387,16 @@ impl LlmState {
             if let Some(Discarded { served, usage }) = discarded {
                 self.record_served_usage(&context, &served.provider, &served.model, &usage)
                     .await;
+                prior_cost = self.request_cost(&context, &served.provider, &served.model, &usage);
             }
             (served, stream)
         } else {
             self.complete_stream_with_failover(&request, &context, &provider_name, &model_id, &provider)
                 .await?
         };
+
+        // Report what the request cost on the stream's final usage
+        let stream = self.with_reported_cost(stream, &context, &served, prior_cost);
 
         // Wrap stream to intercept usage events for billing and reporting,
         // all on the model that served the stream
@@ -1482,6 +1548,30 @@ fn cache_scope(context: &RequestContext) -> Option<synapse_cache::CacheScope> {
         CacheBillingMode::Unbilled,
         None,
     )
+}
+
+/// What one served attempt cost the caller: the retail charge (rounded up to
+/// the ledger precision, exactly as it is deducted) and the upstream cost
+#[cfg(feature = "billing")]
+fn attempt_cost(
+    registry: &ModelRegistry,
+    margins: &MarginPolicy,
+    context: &RequestContext,
+    provider_name: &str,
+    model_id: &str,
+    usage: &Usage,
+) -> Option<RequestCost> {
+    let identity = context.billing_identity.as_ref()?;
+    if identity.mode != synapse_core::BillingMode::Managed {
+        return Some(RequestCost::default());
+    }
+    let profile = registry.find(provider_name, model_id)?;
+    let upstream = profile.estimate_cost(usage.prompt_tokens as usize, usage.completion_tokens as usize);
+    let margin = margins.resolve(Some(&identity.app_id), identity.plan.as_deref(), provider_name);
+    Some(RequestCost::new(
+        synapse_billing::round_up_to_ledger_precision(upstream * margin),
+        upstream,
+    ))
 }
 
 /// Price a managed request on the model that will actually serve it

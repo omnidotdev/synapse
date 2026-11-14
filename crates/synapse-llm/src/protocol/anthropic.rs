@@ -196,6 +196,9 @@ pub struct AnthropicUsage {
     pub input_tokens: u32,
     /// Output tokens
     pub output_tokens: u32,
+    /// What the request cost through the gateway (gateway responses only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synapse_cost: Option<crate::types::RequestCost>,
 }
 
 // -- Streaming types --

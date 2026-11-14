@@ -170,6 +170,7 @@ impl From<Usage> for OpenAiUsage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            synapse_cost: usage.cost,
         }
     }
 }
@@ -313,6 +314,7 @@ pub fn openai_chunk_to_events(chunk: &OpenAiStreamChunk) -> Vec<StreamEvent> {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cost: None,
         }));
     }
 
@@ -396,6 +398,7 @@ pub fn usage_to_openai_chunk(usage: &Usage, id: &str, model: &str, created: u64)
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            synapse_cost: usage.cost,
         }),
     }
 }
@@ -442,6 +445,7 @@ impl From<OpenAiResponse> for CompletionResponse {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
+                cost: None,
             }),
         }
     }

@@ -133,6 +133,7 @@ impl Provider for BedrockProvider {
             prompt_tokens: u.input_tokens() as u32,
             completion_tokens: u.output_tokens() as u32,
             total_tokens: u.total_tokens() as u32,
+            cost: None,
         });
 
         let now = std::time::SystemTime::now()
@@ -264,6 +265,7 @@ impl Provider for BedrockProvider {
                                 prompt_tokens: u.input_tokens() as u32,
                                 completion_tokens: u.output_tokens() as u32,
                                 total_tokens: u.total_tokens() as u32,
+                                cost: None,
                             }))
                         }),
                         _ => None,

@@ -493,6 +493,7 @@ impl From<AnthropicResponse> for CompletionResponse {
                 prompt_tokens: resp.usage.input_tokens,
                 completion_tokens: resp.usage.output_tokens,
                 total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
+                cost: None,
             }),
         }
     }
@@ -544,6 +545,7 @@ impl From<CompletionResponse> for AnthropicResponse {
             usage: AnthropicUsage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
+                synapse_cost: usage.cost,
             },
         }
     }
@@ -691,6 +693,7 @@ impl AnthropicStreamState {
                         prompt_tokens: input_tokens,
                         completion_tokens: usage.output_tokens,
                         total_tokens: input_tokens + usage.output_tokens,
+                        cost: None,
                     }));
                 }
 
@@ -760,6 +763,7 @@ pub fn internal_to_anthropic_stream_events(
                 usage: Some(AnthropicUsage {
                     input_tokens: usage.prompt_tokens,
                     output_tokens: usage.completion_tokens,
+                    synapse_cost: usage.cost,
                 }),
             }]
         }
