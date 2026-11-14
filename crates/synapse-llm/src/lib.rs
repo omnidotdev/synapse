@@ -14,6 +14,8 @@ pub mod error;
 #[cfg(feature = "http")]
 pub mod handler;
 pub mod health;
+#[cfg(test)]
+mod key_tests;
 pub mod protocol;
 pub mod provider;
 pub mod routing;

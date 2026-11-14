@@ -61,7 +61,9 @@ impl SttProvider for DeepgramProvider {
         &self,
         request: TranscriptionRequest,
         _context: &RequestContext,
+        api_key: Option<&SecretString>,
     ) -> crate::error::Result<TranscriptionResponse> {
+        let api_key = api_key.unwrap_or(&self.api_key);
         let mut parsed_url = reqwest::Url::parse(&format!("{}/listen", self.base_url))
             .map_err(|e| crate::error::SttError::ConfigError(format!("invalid base URL: {e}")))?;
         parsed_url
@@ -82,7 +84,7 @@ impl SttProvider for DeepgramProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Token {}", self.api_key.expose_secret()))
+            .header("Authorization", format!("Token {}", api_key.expose_secret()))
             .header("Content-Type", &request.content_type)
             .body(request.audio)
             .send()

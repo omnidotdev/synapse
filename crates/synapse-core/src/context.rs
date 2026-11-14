@@ -11,7 +11,11 @@ use serde_json::Value;
 pub struct RequestContext {
     /// HTTP request parts (method, URI, headers, extensions)
     pub parts: http::request::Parts,
-    /// User-provided API key that overrides the configured key
+    /// Upstream key that overrides the provider's configured key
+    ///
+    /// Written only by the gateway's billing-mode key resolution (the caller's
+    /// BYOK key or the managed key for the target provider), never from client
+    /// input. `None` means the provider uses its configured key
     pub api_key: Option<SecretString>,
     /// Client identity for rate limiting and access control
     pub client_identity: Option<ClientIdentity>,
@@ -55,6 +59,49 @@ impl RequestContext {
     /// Access request headers
     pub const fn headers(&self) -> &http::HeaderMap {
         &self.parts.headers
+    }
+}
+
+/// A BYOK request targets a provider the caller has no key registered for
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingProviderKey {
+    /// Provider the request targets
+    pub provider: String,
+}
+
+impl std::fmt::Display for MissingProviderKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no BYOK key registered for provider '{}'. Register one via setProviderKey or use a managed-mode API key",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for MissingProviderKey {}
+
+/// The caller's own key a request must send upstream to `provider`
+///
+/// A BYOK request is not metered, so it must run on the caller's key: never
+/// the gateway's configured key, which would make it free inference. Managed
+/// requests and requests without a billing identity return `None` and keep
+/// the provider's configured key
+///
+/// # Errors
+///
+/// Returns `MissingProviderKey` for a BYOK request when the caller has no
+/// key registered for `provider`
+pub fn byok_provider_key<'a, S: std::hash::BuildHasher>(
+    billing_identity: Option<&BillingIdentity>,
+    provider_keys: &'a HashMap<String, SecretString, S>,
+    provider: &str,
+) -> Result<Option<&'a SecretString>, MissingProviderKey> {
+    match billing_identity.map(|identity| &identity.mode) {
+        Some(BillingMode::Byok) => provider_keys.get(provider).map(Some).ok_or_else(|| MissingProviderKey {
+            provider: provider.to_owned(),
+        }),
+        Some(BillingMode::Managed) | None => Ok(None),
     }
 }
 
@@ -209,5 +256,52 @@ mod tests {
         assert!(ctx.api_key.is_none());
         assert!(ctx.client_identity.is_none());
         assert!(ctx.headers().is_empty());
+    }
+
+    fn identity(mode: BillingMode) -> BillingIdentity {
+        BillingIdentity {
+            app_id: "synapse".to_owned(),
+            entity_type: "user".to_owned(),
+            entity_id: "usr_1".to_owned(),
+            mode,
+            plan: None,
+        }
+    }
+
+    fn keys() -> HashMap<String, SecretString> {
+        HashMap::from([("openai".to_owned(), SecretString::from("byok-openai"))])
+    }
+
+    #[test]
+    fn byok_request_uses_the_callers_key_for_the_provider() {
+        use secrecy::ExposeSecret;
+
+        let keys = keys();
+        let key = byok_provider_key(Some(&identity(BillingMode::Byok)), &keys, "openai").unwrap();
+
+        assert_eq!(key.map(ExposeSecret::expose_secret), Some("byok-openai"));
+    }
+
+    #[test]
+    fn byok_request_without_a_key_for_the_provider_is_an_error() {
+        let err = byok_provider_key(Some(&identity(BillingMode::Byok)), &keys(), "anthropic").unwrap_err();
+
+        assert_eq!(err.provider, "anthropic");
+        assert!(
+            err.to_string()
+                .contains("no BYOK key registered for provider 'anthropic'")
+        );
+    }
+
+    #[test]
+    fn managed_and_anonymous_requests_keep_the_configured_key() {
+        let keys = keys();
+
+        assert!(
+            byok_provider_key(Some(&identity(BillingMode::Managed)), &keys, "openai")
+                .unwrap()
+                .is_none()
+        );
+        assert!(byok_provider_key(None, &keys, "openai").unwrap().is_none());
     }
 }

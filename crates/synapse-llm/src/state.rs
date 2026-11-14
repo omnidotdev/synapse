@@ -392,6 +392,13 @@ impl LlmState {
         let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
 
         for (name, provider_config) in &config.providers {
+            if provider_config.forward_authorization {
+                tracing::warn!(
+                    provider = %name,
+                    "forward_authorization is deprecated and has no effect, the resolved request key is always used"
+                );
+            }
+
             let provider: Arc<dyn Provider> = match &provider_config.provider_type {
                 LlmProviderType::Openai => Arc::new(crate::provider::openai::OpenAiProvider::new(
                     name.clone(),
@@ -875,6 +882,18 @@ impl LlmState {
                         continue;
                     };
 
+                    let alt_context = match self.context_for_provider(context, &alt_provider) {
+                        Ok(keyed) => keyed,
+                        Err(e) => {
+                            tracing::debug!(
+                                provider = %alt_provider,
+                                error = %e,
+                                "skipping alternative provider without a usable key"
+                            );
+                            continue;
+                        }
+                    };
+
                     tracing::warn!(
                         from_provider = provider_name,
                         to_provider = %alt_provider,
@@ -885,7 +904,7 @@ impl LlmState {
                     let mut alt_req = request.clone();
                     alt_req.model.clone_from(&alt_model);
 
-                    match alt_provider_impl.complete(&alt_req, context).await {
+                    match alt_provider_impl.complete(&alt_req, &alt_context).await {
                         Ok(response) => {
                             self.inner.health.record_success(&alt_provider);
                             return Ok(response);
@@ -981,6 +1000,18 @@ impl LlmState {
                         continue;
                     };
 
+                    let alt_context = match self.context_for_provider(context, &alt_provider) {
+                        Ok(keyed) => keyed,
+                        Err(e) => {
+                            tracing::debug!(
+                                provider = %alt_provider,
+                                error = %e,
+                                "skipping alternative provider without a usable key"
+                            );
+                            continue;
+                        }
+                    };
+
                     tracing::warn!(
                         from_provider = provider_name,
                         to_provider = %alt_provider,
@@ -991,7 +1022,7 @@ impl LlmState {
                     let mut alt_req = request.clone();
                     alt_req.model.clone_from(&alt_model);
 
-                    match alt_provider_impl.complete_stream(&alt_req, context).await {
+                    match alt_provider_impl.complete_stream(&alt_req, &alt_context).await {
                         Ok(stream) => {
                             self.inner.health.record_success(&alt_provider);
                             return Ok((alt_model, stream));
@@ -1138,7 +1169,22 @@ impl LlmState {
                 provider: esc_provider_name.clone(),
             })?;
 
-        self.complete_stream_with_failover(request, context, esc_provider_name, esc_model_id, esc_provider)
+        // The escalation provider needs its own key; without a usable one,
+        // keep the initial model's response rather than send it another key
+        let esc_context = match self.context_for_provider(context, esc_provider_name) {
+            Ok(keyed) => keyed,
+            Err(e) => {
+                tracing::info!(
+                    escalation_provider = %esc_provider_name,
+                    error = %e,
+                    "cascade: no usable key for the escalation provider, replaying buffer"
+                );
+                let replay: Vec<Result<StreamEvent, LlmError>> = buffered_events.into_iter().map(Ok).collect();
+                return Ok((initial_model, Box::pin(futures_util::stream::iter(replay))));
+            }
+        };
+
+        self.complete_stream_with_failover(request, &esc_context, esc_provider_name, esc_model_id, esc_provider)
             .await
     }
 
@@ -1163,45 +1209,58 @@ impl LlmState {
         Ok((best.provider.clone(), best.model.clone()))
     }
 
-    /// Resolve the API key for a request based on billing mode
+    /// Resolve the upstream key for a request to `provider_name` based on
+    /// billing mode, overwriting any key resolved for another provider
     ///
-    /// - BYOK: use the decrypted provider key from the resolved API key.
-    ///   Fails if no key is registered for the target provider.
-    /// - Managed: use the managed provider key from billing config
-    /// - No billing identity: leave context unchanged (provider uses its
-    ///   configured key)
+    /// - BYOK: the caller's own key for the provider. A BYOK request is not
+    ///   metered, so it must never fall back to the configured key
+    /// - Managed: the managed key for the provider, or `None` (the provider's
+    ///   configured key) when none is set
+    /// - No billing identity: `None`, so the provider uses its configured key
     ///
     /// # Errors
     ///
-    /// Returns `LlmError::InvalidRequest` when a BYOK user has no key
-    /// registered for the target provider
+    /// Returns `LlmError::InvalidRequest` when a BYOK caller has no key
+    /// registered for the provider, or the provider cannot carry a caller key
     fn resolve_api_key_for_request(&self, context: &mut RequestContext, provider_name: &str) -> Result<(), LlmError> {
         use synapse_core::BillingMode;
 
-        let Some(ref identity) = context.billing_identity else {
-            return Ok(());
+        context.api_key = match context.billing_identity.as_ref().map(|identity| &identity.mode) {
+            None => None,
+            Some(BillingMode::Byok) => {
+                if self
+                    .inner
+                    .providers
+                    .get(provider_name)
+                    .is_some_and(|provider| !provider.accepts_request_api_key())
+                {
+                    return Err(LlmError::InvalidRequest(format!(
+                        "provider '{provider_name}' does not support BYOK keys. Use a managed-mode API key"
+                    )));
+                }
+                let key = synapse_core::byok_provider_key(
+                    context.billing_identity.as_ref(),
+                    &context.provider_keys,
+                    provider_name,
+                )
+                .map_err(|e| LlmError::InvalidRequest(e.to_string()))?;
+                key.cloned()
+            }
+            Some(BillingMode::Managed) => self.inner.managed_keys.get(provider_name).cloned(),
         };
 
-        match identity.mode {
-            BillingMode::Byok => {
-                // Use decrypted BYOK key for this provider
-                let key = context.provider_keys.get(provider_name).ok_or_else(|| {
-                    LlmError::InvalidRequest(format!(
-                        "no BYOK key registered for provider '{provider_name}'. \
-                         Register one via setProviderKey or use a managed-mode API key"
-                    ))
-                })?;
-                context.api_key = Some(key.clone());
-            }
-            BillingMode::Managed => {
-                // Use the managed provider key
-                if let Some(managed_key) = self.inner.managed_keys.get(provider_name) {
-                    context.api_key = Some(managed_key.clone());
-                }
-            }
-        }
-
         Ok(())
+    }
+
+    /// A copy of `context` keyed for `provider_name`
+    ///
+    /// Failover and cascade escalation reach providers other than the one the
+    /// request was keyed for, so each attempt is keyed again: a key is only
+    /// ever sent to the provider it belongs to
+    fn context_for_provider(&self, context: &RequestContext, provider_name: &str) -> Result<RequestContext, LlmError> {
+        let mut keyed = context.clone();
+        self.resolve_api_key_for_request(&mut keyed, provider_name)?;
+        Ok(keyed)
     }
 
     /// Check if the current routing strategy is cascade

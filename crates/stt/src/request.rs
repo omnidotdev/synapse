@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::body::Body;
 use secrecy::SecretString;
 use synapse_core::{Authentication, BillingIdentity, ClientIdentity};
@@ -13,7 +15,10 @@ const PROVIDER_API_KEY_HEADER: &str = "X-Provider-API-Key";
 pub struct RequestContext {
     pub parts: http::request::Parts,
 
-    /// User-provided API key that overrides the configured key
+    /// Value of the `X-Provider-API-Key` header
+    ///
+    /// Never sent upstream: the upstream key follows the billing mode (the
+    /// caller's registered BYOK key, else the configured key)
     pub api_key: Option<SecretString>,
 
     /// Client identity information for rate limiting and access control
@@ -23,6 +28,9 @@ pub struct RequestContext {
 
     /// Billing identity resolved from JWT, if billing is enabled
     pub billing_identity: Option<BillingIdentity>,
+
+    /// Decrypted BYOK provider keys keyed by provider name
+    pub provider_keys: HashMap<String, SecretString>,
 }
 
 #[allow(dead_code)]
@@ -228,9 +236,22 @@ where
             client_identity: parts.extensions.remove(),
             authentication: parts.extensions.remove().unwrap_or_default(),
             billing_identity: parts.extensions.remove(),
+            provider_keys: gateway_provider_keys(&parts),
             parts,
         };
 
         Ok(Self(ctx, transcription_request))
     }
+}
+
+/// BYOK provider keys the gateway resolved for the caller
+///
+/// Read from the gateway request context, which merges the keys resolved
+/// from the caller's API key with any vault overlay
+fn gateway_provider_keys(parts: &http::request::Parts) -> HashMap<String, SecretString> {
+    parts
+        .extensions
+        .get::<synapse_core::RequestContext>()
+        .map(|context| context.provider_keys.clone())
+        .unwrap_or_default()
 }

@@ -80,6 +80,12 @@ impl Provider for BedrockProvider {
         }
     }
 
+    // Bedrock signs with the gateway's AWS credentials, so a caller key
+    // cannot be carried
+    fn accepts_request_api_key(&self) -> bool {
+        false
+    }
+
     async fn complete(
         &self,
         request: &CompletionRequest,

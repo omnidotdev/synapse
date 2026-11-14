@@ -46,7 +46,9 @@ impl SttProvider for WhisperProvider {
         &self,
         request: TranscriptionRequest,
         _context: &RequestContext,
+        api_key: Option<&SecretString>,
     ) -> crate::error::Result<TranscriptionResponse> {
+        let api_key = api_key.unwrap_or(&self.api_key);
         let url = format!("{}/audio/transcriptions", self.base_url);
 
         tracing::debug!(
@@ -84,7 +86,7 @@ impl SttProvider for WhisperProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header("Authorization", format!("Bearer {}", api_key.expose_secret()))
             .multipart(form)
             .send()
             .await
