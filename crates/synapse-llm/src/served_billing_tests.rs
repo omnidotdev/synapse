@@ -393,13 +393,26 @@ async fn cascade_escalation_bills_both_attempts_each_at_its_own_model() {
 
     let state = llm_state(&cheap, &pricey, &aether, Setup::Cascade).await;
 
-    let (served, stream) = state
+    let (served, mut stream) = state
         .complete_stream(request("auto", true), context("facet", "user", "usr_1"))
         .await
         .unwrap();
 
     assert_eq!(served, PRICEY);
-    assert!(drain(stream).await);
+    let mut cost = None;
+    while let Some(event) = stream.next().await {
+        if let Ok(StreamEvent::Usage(usage)) = event {
+            cost = usage.cost;
+        }
+    }
+    // The reported cost covers both attempts: $4 + $12 retail on $2 + $6 upstream
+    assert_eq!(
+        cost,
+        Some(crate::types::RequestCost::new(
+            CHEAP_ACTUAL_USD + PRICEY_ACTUAL_USD,
+            8.0
+        ))
+    );
     wait_for_requests(&aether, "/credits/facet/user/usr_1/deduct", 2).await;
     assert_eq!(
         metered_models(&aether, 2).await,

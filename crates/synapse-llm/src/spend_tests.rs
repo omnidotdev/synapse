@@ -145,7 +145,7 @@ pub async fn mount_completion(provider: &MockServer, times: u64) {
         .await;
 }
 
-async fn mount_streamed_completion(provider: &MockServer) {
+pub async fn mount_streamed_completion(provider: &MockServer) {
     let chunk = serde_json::json!({
         "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": MODEL,
         "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "groceries" }, "finish_reason": "stop" }]

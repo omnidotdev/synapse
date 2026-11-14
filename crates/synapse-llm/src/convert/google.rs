@@ -176,6 +176,7 @@ impl From<GoogleResponse> for CompletionResponse {
             prompt_tokens: u.prompt_token_count,
             completion_tokens: u.candidates_token_count,
             total_tokens: u.total_token_count,
+            cost: None,
         });
 
         Self {
@@ -307,6 +308,7 @@ pub fn google_chunk_to_events(chunk: &GoogleResponse) -> Vec<StreamEvent> {
             prompt_tokens: usage.prompt_token_count,
             completion_tokens: usage.candidates_token_count,
             total_tokens: usage.total_token_count,
+            cost: None,
         }));
     }
 

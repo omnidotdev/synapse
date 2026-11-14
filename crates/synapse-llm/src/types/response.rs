@@ -25,6 +25,47 @@ pub struct Usage {
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion)
     pub total_tokens: u32,
+    /// What the request cost, set by the gateway once it is billed. Never
+    /// stored in the response cache: a cache hit is costed afresh
+    #[serde(skip)]
+    pub cost: Option<RequestCost>,
+}
+
+/// What a request cost the caller, reported back on its usage
+///
+/// Serialized as the `synapse_cost` object on the final usage of a response
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct RequestCost {
+    /// Retail amount charged in US dollars, after the product margin and
+    /// rounded up to the ledger's $0.0001 like the charge itself (0 for BYOK)
+    pub cost_usd: f64,
+    /// `cost_usd` in display credits ($0.01 each)
+    pub credits: f64,
+    /// Upstream provider cost in US dollars, before the margin (0 for BYOK,
+    /// whose upstream cost the caller pays directly)
+    pub provider_cost_usd: f64,
+}
+
+impl RequestCost {
+    /// The cost of a request charged `charged_usd` (already rounded to the
+    /// ledger precision) for `provider_cost_usd` of upstream spend
+    #[must_use]
+    pub fn new(charged_usd: f64, provider_cost_usd: f64) -> Self {
+        Self {
+            cost_usd: charged_usd,
+            credits: (charged_usd * 10_000.0).round() / 100.0,
+            provider_cost_usd,
+        }
+    }
+
+    /// The combined cost of two billed attempts at one request
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self::new(
+            self.cost_usd + other.cost_usd,
+            self.provider_cost_usd + other.provider_cost_usd,
+        )
+    }
 }
 
 /// A single completion choice

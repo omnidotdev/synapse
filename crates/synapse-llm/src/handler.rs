@@ -14,7 +14,7 @@ use crate::error::LlmError;
 use crate::protocol::anthropic::{AnthropicRequest, AnthropicResponse};
 use crate::protocol::openai::{OpenAiModel, OpenAiModelList, OpenAiRequest, OpenAiResponse};
 use crate::state::LlmState;
-use crate::types::{CompletionRequest, StreamEvent};
+use crate::types::{CompletionRequest, RequestCost, StreamEvent};
 
 /// Body limit for completion requests (32 MiB)
 ///
@@ -64,8 +64,9 @@ async fn openai_chat_completions(
     } else {
         match state.complete(internal_request, context).await {
             Ok(response) => {
+                let cost = response.usage.as_ref().and_then(|usage| usage.cost);
                 let wire_response: OpenAiResponse = response.into();
-                Json(wire_response).into_response()
+                with_cost_headers(Json(wire_response).into_response(), cost)
             }
             Err(e) => error_to_openai_response(e),
         }
@@ -180,8 +181,9 @@ async fn anthropic_messages(
     } else {
         match state.complete(internal_request, context).await {
             Ok(response) => {
+                let cost = response.usage.as_ref().and_then(|usage| usage.cost);
                 let wire_response: AnthropicResponse = response.into();
-                Json(wire_response).into_response()
+                with_cost_headers(Json(wire_response).into_response(), cost)
             }
             Err(e) => error_to_anthropic_response(e),
         }
@@ -247,6 +249,50 @@ fn error_to_anthropic_response(error: LlmError) -> Response {
     });
 
     (status, Json(body)).into_response()
+}
+
+/// Retail amount charged for the request in US dollars
+pub const COST_USD_HEADER: &str = "x-synapse-cost-usd";
+/// The retail amount in display credits ($0.01 each)
+pub const CREDITS_HEADER: &str = "x-synapse-credits";
+/// Upstream provider cost in US dollars, before the margin
+pub const PROVIDER_COST_USD_HEADER: &str = "x-synapse-provider-cost-usd";
+
+/// Report a non-streamed request's cost in response headers
+///
+/// A streamed request carries the same figures as `synapse_cost` on its final
+/// usage. Nothing is added for a request that is not billed
+fn with_cost_headers(mut response: Response, cost: Option<RequestCost>) -> Response {
+    let Some(cost) = cost else {
+        return response;
+    };
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (COST_USD_HEADER, decimal(cost.cost_usd, 4)),
+        (CREDITS_HEADER, decimal(cost.credits, 2)),
+        (PROVIDER_COST_USD_HEADER, decimal(cost.provider_cost_usd, 10)),
+    ] {
+        if let Ok(value) = http::HeaderValue::from_str(&value) {
+            headers.insert(name, value);
+        }
+    }
+    response
+}
+
+/// A non-negative amount as a plain decimal with at most `places` decimal
+/// places and no trailing zeros
+fn decimal(amount: f64, places: usize) -> String {
+    let amount = if amount.is_finite() && amount > 0.0 {
+        amount
+    } else {
+        0.0
+    };
+    let formatted = format!("{amount:.places$}");
+    if formatted.contains('.') {
+        formatted.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        formatted
+    }
 }
 
 /// Get the SSE event type name for an Anthropic stream event

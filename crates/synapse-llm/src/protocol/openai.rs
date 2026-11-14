@@ -209,6 +209,9 @@ pub struct OpenAiUsage {
     pub completion_tokens: u32,
     /// Total tokens
     pub total_tokens: u32,
+    /// What the request cost through the gateway (gateway responses only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synapse_cost: Option<crate::types::RequestCost>,
 }
 
 // -- Streaming types --
