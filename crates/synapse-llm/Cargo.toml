@@ -49,6 +49,7 @@ url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+synapse-cache = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 

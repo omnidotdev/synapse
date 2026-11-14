@@ -7,6 +7,10 @@ homepage.workspace = true
 keywords.workspace = true
 repository.workspace = true
 
+[features]
+# In-process backend for tests in dependent crates
+test-util = []
+
 [dependencies]
 redis.workspace = true
 serde.workspace = true

@@ -19,18 +19,18 @@ use crate::error::LlmError;
 use crate::state::LlmState;
 use crate::types::{CompletionRequest, StreamEvent};
 
-const MODEL: &str = "gpt-test";
+pub const MODEL: &str = "gpt-test";
 
 // Request estimate: a 4000-char prompt is 1000 input tokens, plus max_tokens
 // 1000 output, at $1000/Mtok in and $2000/Mtok out: $3 upstream, $6 retail at
 // the 2.0 product margin, 600 credits
-const ESTIMATED_CREDITS: f64 = 600.0;
+pub const ESTIMATED_CREDITS: f64 = 600.0;
 // Actual usage: 1000 input + 500 output tokens: $2 upstream, $4 retail, 400 credits
-const ACTUAL_CREDITS: f64 = 400.0;
-const ACTUAL_USD: f64 = 4.0;
+pub const ACTUAL_CREDITS: f64 = 400.0;
+pub const ACTUAL_USD: f64 = 4.0;
 
 /// Matches a numeric query parameter within float tolerance
-struct QueryApprox(&'static str, f64);
+pub struct QueryApprox(pub &'static str, pub f64);
 
 impl Match for QueryApprox {
     fn matches(&self, request: &Request) -> bool {
@@ -44,7 +44,7 @@ impl Match for QueryApprox {
 }
 
 /// Matches a numeric top-level JSON body field within float tolerance
-struct BodyApprox(&'static str, f64);
+pub struct BodyApprox(pub &'static str, pub f64);
 
 impl Match for BodyApprox {
     fn matches(&self, request: &Request) -> bool {
@@ -55,7 +55,7 @@ impl Match for BodyApprox {
     }
 }
 
-async fn llm_state(provider: &MockServer, aether: &MockServer, fail_mode: FailMode) -> LlmState {
+pub async fn llm_state(provider: &MockServer, aether: &MockServer, fail_mode: FailMode) -> LlmState {
     let mut config = LlmConfig::default();
     config.providers.insert(
         "mock".to_owned(),
@@ -103,7 +103,7 @@ async fn llm_state(provider: &MockServer, aether: &MockServer, fail_mode: FailMo
     state
 }
 
-fn context(app_id: &str, entity_type: &str, entity_id: &str) -> RequestContext {
+pub fn context(app_id: &str, entity_type: &str, entity_id: &str) -> RequestContext {
     let mut ctx = RequestContext::empty();
     ctx.billing_identity = Some(BillingIdentity {
         app_id: app_id.to_owned(),
@@ -115,7 +115,7 @@ fn context(app_id: &str, entity_type: &str, entity_id: &str) -> RequestContext {
     ctx
 }
 
-fn request(stream: bool) -> CompletionRequest {
+pub fn request(stream: bool) -> CompletionRequest {
     serde_json::from_value(serde_json::json!({
         "model": format!("mock/{MODEL}"),
         "messages": [{ "role": "user", "content": "x".repeat(4000) }],
@@ -125,7 +125,7 @@ fn request(stream: bool) -> CompletionRequest {
     .unwrap()
 }
 
-async fn mount_completion(provider: &MockServer, times: u64) {
+pub async fn mount_completion(provider: &MockServer, times: u64) {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -166,7 +166,7 @@ async fn mount_streamed_completion(provider: &MockServer) {
 }
 
 /// The token and request meters every managed request records, as today
-async fn mount_usage_meters(aether: &MockServer) {
+pub async fn mount_usage_meters(aether: &MockServer) {
     Mock::given(method("POST"))
         .and(path_regex(
             r"^/usage/[a-z]+/[a-z]+/[a-z0-9_]+/(input_tokens|output_tokens|requests|messages)/record$",
@@ -176,7 +176,7 @@ async fn mount_usage_meters(aether: &MockServer) {
         .await;
 }
 
-async fn forbid_wallet(aether: &MockServer) {
+pub async fn forbid_wallet(aether: &MockServer) {
     Mock::given(path_regex(r"^/credits/"))
         .respond_with(ResponseTemplate::new(200))
         .expect(0)
@@ -210,7 +210,7 @@ async fn mount_allowance_record(aether: &MockServer, times: u64) {
 }
 
 /// Wait for a fire-and-forget request to reach the mock
-async fn wait_for_request(server: &MockServer, url_path: &str) {
+pub async fn wait_for_request(server: &MockServer, url_path: &str) {
     for _ in 0..100 {
         let seen = server
             .received_requests()

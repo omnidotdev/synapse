@@ -68,31 +68,6 @@ impl LlmState {
         request: CompletionRequest,
         mut context: RequestContext,
     ) -> Result<CompletionResponse, LlmError> {
-        // Check response cache for deterministic requests
-        #[cfg(feature = "cache")]
-        let cache_key = if synapse_cache::is_cacheable(request.params.temperature, request.stream) {
-            if let Some(ref cache) = self.inner.response_cache {
-                let key = synapse_cache::compute_cache_key(&request);
-                match cache.get(&key).await {
-                    Ok(Some(cached)) => {
-                        tracing::info!("serving cached response");
-                        let response: CompletionResponse = serde_json::from_str(&cached.body)
-                            .map_err(|e| LlmError::Internal(anyhow::anyhow!("cache deserialization: {e}")))?;
-                        return Ok(response);
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "cache lookup failed, proceeding without cache");
-                    }
-                }
-                Some(key)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let (provider_name, model_id, provider, explicit_provider) =
             self.resolve_provider(&request.model, &request, &context).await?;
 
@@ -107,6 +82,42 @@ impl LlmState {
             self.check_spend(&context, cost).await?;
         }
 
+        // The cache is consulted only after every check a live request gets
+        // (auth and entitlements in middleware, provider and key resolution,
+        // the spend check above), and a hit is billed exactly like a served
+        // request: the caller receives the full value of the response, so the
+        // cache is a gateway cost optimization, never a free tier
+        #[cfg(feature = "cache")]
+        let cache_key = self.response_cache_key(&request, &context);
+
+        #[cfg(feature = "cache")]
+        if let Some(ref key) = cache_key
+            && let Some(ref cache) = self.inner.response_cache
+        {
+            match cache.get(key).await {
+                Ok(Some(cached)) => match serde_json::from_str::<CompletionResponse>(&cached.body) {
+                    Ok(response) => {
+                        tracing::info!(
+                            provider = %cached.provider,
+                            model = %cached.model,
+                            "serving cached response"
+                        );
+                        // Bill on the model that produced the cached response
+                        self.record_served_usage(&context, &cached.provider, &cached.model, &response)
+                            .await;
+                        return Ok(response);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cached response unreadable, proceeding without cache");
+                    }
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "cache lookup failed, proceeding without cache");
+                }
+            }
+        }
+
         // Skip failover when the user explicitly selected a provider (e.g.
         // "nvidia/moonshotai/kimi-k2.5"), surface the error instead of
         // silently routing to a different model
@@ -118,52 +129,14 @@ impl LlmState {
                 .await?
         };
 
-        // Record usage for billing
-        #[cfg(feature = "billing")]
-        if let Some(ref recorder) = self.inner.usage_recorder
-            && let Some(ref usage) = response.usage
-        {
-            dispatch_usage_event(
-                recorder,
-                &context,
-                &provider_name,
-                &model_id,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                &self.inner.model_registry,
-                &self.inner.margins,
-            );
-        }
-
-        // Post-completion charge for actual usage
-        #[cfg(feature = "billing")]
-        if let Some(ref usage) = response.usage {
-            self.settle_spend_for_usage(
-                &context,
-                &provider_name,
-                &model_id,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-            )
+        self.record_served_usage(&context, &provider_name, &model_id, &response)
             .await;
-        }
 
-        // Report usage to synapse-api for dashboard charts
-        if let Some(ref usage) = response.usage {
-            dispatch_usage_report(
-                &context,
-                &provider_name,
-                &model_id,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                &self.inner.model_registry,
-                &self.inner.margins,
-            );
-        }
-
-        // Store successful response in cache
+        // Store successful response in cache. A response without usage is
+        // never stored, since a hit on it could not be billed
         #[cfg(feature = "cache")]
         if let Some(ref key) = cache_key
+            && response.usage.is_some()
             && let Some(ref cache) = self.inner.response_cache
             && let Ok(body) = serde_json::to_string(&response)
         {
@@ -178,6 +151,90 @@ impl LlmState {
         }
 
         Ok(response)
+    }
+
+    /// Meter, charge, and report a served completion's usage
+    ///
+    /// Shared by live responses and cache hits so both are billed the same
+    /// way: usage events, the managed spend settlement (credit wallet or
+    /// included allowance, each with a fresh idempotency key), and the
+    /// dashboard usage report
+    async fn record_served_usage(
+        &self,
+        context: &RequestContext,
+        provider_name: &str,
+        model_id: &str,
+        response: &CompletionResponse,
+    ) {
+        let Some(ref usage) = response.usage else {
+            return;
+        };
+
+        // Record usage for billing
+        #[cfg(feature = "billing")]
+        if let Some(ref recorder) = self.inner.usage_recorder {
+            dispatch_usage_event(
+                recorder,
+                context,
+                provider_name,
+                model_id,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                &self.inner.model_registry,
+                &self.inner.margins,
+            );
+        }
+
+        // Post-completion charge for actual usage
+        #[cfg(feature = "billing")]
+        self.settle_spend_for_usage(
+            context,
+            provider_name,
+            model_id,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
+        .await;
+
+        // Report usage to synapse-api for dashboard charts
+        dispatch_usage_report(
+            context,
+            provider_name,
+            model_id,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            &self.inner.model_registry,
+            &self.inner.margins,
+        );
+    }
+
+    /// Cache key for a request, when the response cache applies to it
+    ///
+    /// `None` unless the cache is configured, the caller opted in, the
+    /// request is not streamed, and the caller has an identity to scope the
+    /// entry to (an anonymous request is never cached)
+    #[cfg(feature = "cache")]
+    fn response_cache_key(
+        &self,
+        request: &CompletionRequest,
+        context: &RequestContext,
+    ) -> Option<synapse_cache::CacheKey> {
+        self.inner.response_cache.as_ref()?;
+
+        let opted_in = synapse_cache::opt_in_requested(
+            context
+                .headers()
+                .get(synapse_cache::OPT_IN_HEADER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        if !synapse_cache::is_cacheable(opted_in, request.stream) {
+            return None;
+        }
+
+        let scope = cache_scope(context)?;
+        synapse_cache::CacheKey::new(&scope, request)
+            .inspect_err(|e| tracing::warn!(error = %e, "cache key derivation failed, proceeding without cache"))
+            .ok()
     }
 
     /// Execute a streaming completion with automatic provider
@@ -1155,6 +1212,57 @@ impl LlmState {
         let config = self.map_routing_class(model);
         matches!(config.strategy, synapse_config::RoutingStrategy::Cascade)
     }
+}
+
+/// The tenant a cached response belongs to
+///
+/// The billing identity (product, entity, managed vs BYOK) plus the API key
+/// that made the request, falling back to the resolved key's owner, then the
+/// client identity when billing is off. `None` when the request carries no
+/// identity at all, so it is never cached
+#[cfg(feature = "cache")]
+fn cache_scope(context: &RequestContext) -> Option<synapse_cache::CacheScope> {
+    use synapse_cache::{CacheBillingMode, CacheScope};
+
+    let resolved = context.parts.extensions.get::<synapse_auth::ResolvedKey>();
+    let principal = resolved.map(|r| format!("{}:{}", r.user_id, r.api_key_id));
+
+    if let Some(identity) = context.billing_identity.as_ref() {
+        let mode = match identity.mode {
+            synapse_core::BillingMode::Managed => CacheBillingMode::Managed,
+            synapse_core::BillingMode::Byok => CacheBillingMode::Byok,
+        };
+        return CacheScope::new(
+            identity.app_id.as_str(),
+            identity.entity_type.as_str(),
+            identity.entity_id.as_str(),
+            mode,
+            principal,
+        );
+    }
+
+    if let Some(resolved) = resolved {
+        let mode = match resolved.mode {
+            synapse_auth::KeyMode::Byok => CacheBillingMode::Byok,
+            synapse_auth::KeyMode::Managed | synapse_auth::KeyMode::Manual => CacheBillingMode::Managed,
+        };
+        return CacheScope::new(
+            resolved.app_id.clone().unwrap_or_default(),
+            "user",
+            resolved.user_id.as_str(),
+            mode,
+            principal,
+        );
+    }
+
+    let client = context.client_identity.as_ref()?;
+    CacheScope::new(
+        "",
+        "client",
+        client.client_id.as_str(),
+        CacheBillingMode::Unbilled,
+        None,
+    )
 }
 
 /// Price a managed request on the model that will actually serve it
