@@ -1,10 +1,12 @@
 mod error;
+mod extension;
 mod resolver;
 pub mod usage;
 pub mod vault;
 pub mod vault_events;
 
 pub use error::AuthError;
+pub use extension::{insert_resolved_key, resolved_key};
 pub use resolver::{ApiKeyResolver, BillingEntity, KeyMode, ProviderKeyRef, RateLimits, ResolvedKey};
 pub use usage::{UsageEvent, UsageReporter};
 pub use vault::{VaultClient, VaultError, VaultKey};

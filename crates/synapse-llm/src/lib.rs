@@ -20,6 +20,8 @@ pub mod protocol;
 pub mod provider;
 pub mod routing;
 #[cfg(all(test, feature = "billing"))]
+mod served_billing_tests;
+#[cfg(all(test, feature = "billing"))]
 mod spend_tests;
 pub mod state;
 pub mod types;

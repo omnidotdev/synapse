@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
 use secrecy::SecretString;
-use synapse_auth::ResolvedKey;
 use synapse_core::{Authentication, BillingIdentity, RequestContext};
 
 use crate::auth::VaultProviderKeys;
@@ -24,9 +22,7 @@ pub async fn request_context_middleware(request: Request, next: Next) -> Respons
     let billing_identity = parts.extensions.get::<BillingIdentity>().cloned();
 
     // Extract BYOK provider keys from resolved API key context
-    let mut provider_keys = parts
-        .extensions
-        .get::<Arc<ResolvedKey>>()
+    let mut provider_keys = synapse_auth::resolved_key(&parts.extensions)
         .map(|resolved| {
             resolved
                 .provider_keys
