@@ -283,8 +283,71 @@ async fn streamed_failover_to_a_pricier_model_bills_the_served_model() {
     assert_eq!(metered_model(&aether).await, ("pricey".to_owned(), PRICEY.to_owned()));
 }
 
+/// Every model a request reached, in the order their usage was metered
+async fn metered_models(aether: &MockServer, expected: usize) -> Vec<(String, String)> {
+    let url_path = "/usage/facet/user/usr_1/requests/record";
+    for _ in 0..100 {
+        let recorded: Vec<_> = aether
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == url_path)
+            .collect();
+        if recorded.len() >= expected {
+            let mut models: Vec<(String, String)> = recorded
+                .iter()
+                .map(|r| {
+                    let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                    (
+                        body["metadata"]["provider"].as_str().unwrap_or_default().to_owned(),
+                        body["metadata"]["model"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect();
+            models.sort();
+            return models;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("expected {expected} metered requests");
+}
+
+/// Wait until `expected` requests have reached `url_path`
+async fn wait_for_requests(server: &MockServer, url_path: &str, expected: usize) {
+    for _ in 0..100 {
+        let seen = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == url_path)
+            .count();
+        if seen >= expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("expected {expected} requests to {url_path}");
+}
+
+async fn mount_smart_routing(aether: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/entitlements/facet/user/usr_1/smart_routing/check$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "hasEntitlement": true })))
+        .mount(aether)
+        .await;
+}
+
+/// A cascade can serve both attempts, so its spend check covers the worst
+/// first attempt plus the worst escalation: $18 + $18 here
+const CASCADE_ESTIMATE_USD: f64 = 2.0 * PRICEY_ESTIMATE_USD;
+// The discarded first attempt's 1000 in + 500 out on the cheap model: $2
+// upstream, $4 retail at the 2.0 product margin
+const CHEAP_ACTUAL_USD: f64 = 4.0;
+
 #[tokio::test]
-async fn cascade_escalation_bills_the_escalated_model() {
+async fn cascade_escalation_bills_both_attempts_each_at_its_own_model() {
     let (cheap, pricey, aether) = (
         MockServer::start().await,
         MockServer::start().await,
@@ -293,11 +356,38 @@ async fn cascade_escalation_bills_the_escalated_model() {
     // A one-word answer to a long prompt is low confidence, so it escalates
     mount_streamed_completion(&cheap, CHEAP).await;
     mount_streamed_completion(&pricey, PRICEY).await;
-    mount_wallet_for_pricey(&aether).await;
     mount_usage_meters(&aether).await;
+    mount_smart_routing(&aether).await;
     Mock::given(method("GET"))
-        .and(path_regex(r"^/entitlements/facet/user/usr_1/smart_routing/check$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "hasEntitlement": true })))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .and(QueryApprox("amount", CASCADE_ESTIMATE_USD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sufficient": true, "balance": 50.0
+        })))
+        .expect(1)
+        .named("spend check covers both cascade attempts")
+        .mount(&aether)
+        .await;
+    // The cheap attempt's upstream cost was incurred even though its answer
+    // was discarded, so it is charged at its own price
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .and(BodyApprox("amount", CHEAP_ACTUAL_USD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true, "balance": 46.0
+        })))
+        .expect(1)
+        .named("discarded first attempt charged on the cheap model")
+        .mount(&aether)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .and(BodyApprox("amount", PRICEY_ACTUAL_USD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true, "balance": 34.0
+        })))
+        .expect(1)
+        .named("escalated attempt charged on the escalation model")
         .mount(&aether)
         .await;
 
@@ -310,8 +400,60 @@ async fn cascade_escalation_bills_the_escalated_model() {
 
     assert_eq!(served, PRICEY);
     assert!(drain(stream).await);
+    wait_for_requests(&aether, "/credits/facet/user/usr_1/deduct", 2).await;
+    assert_eq!(
+        metered_models(&aether, 2).await,
+        vec![
+            ("cheap".to_owned(), CHEAP.to_owned()),
+            ("pricey".to_owned(), PRICEY.to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_escalation_serves_and_bills_the_first_attempt_once() {
+    let (cheap, pricey, aether) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    mount_streamed_completion(&cheap, CHEAP).await;
+    mount_failing(&pricey).await;
+    mount_usage_meters(&aether).await;
+    mount_smart_routing(&aether).await;
+    Mock::given(method("GET"))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sufficient": true, "balance": 50.0
+        })))
+        .mount(&aether)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .and(BodyApprox("amount", CHEAP_ACTUAL_USD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true, "balance": 46.0
+        })))
+        .expect(1)
+        .named("the first attempt is served and charged exactly once")
+        .mount(&aether)
+        .await;
+
+    let state = llm_state(&cheap, &pricey, &aether, Setup::Cascade).await;
+
+    let (served, stream) = state
+        .complete_stream(request("auto", true), context("facet", "user", "usr_1"))
+        .await
+        .unwrap();
+
+    assert_eq!(served, CHEAP);
+    assert!(drain(stream).await);
     wait_for_request(&aether, "/credits/facet/user/usr_1/deduct").await;
-    assert_eq!(metered_model(&aether).await, ("pricey".to_owned(), PRICEY.to_owned()));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        metered_models(&aether, 1).await,
+        vec![("cheap".to_owned(), CHEAP.to_owned())]
+    );
 }
 
 #[tokio::test]
