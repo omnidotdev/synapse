@@ -328,14 +328,18 @@ team = 1.15
 facet = 2.0
 keystone = 2.0
 myfi = 2.0
+backfeed = 2.0
 
 # Products that include AI in their SaaS tier (bounded by a monthly fair-use
 # allowance, `ai_included_credits` in the catalog), as product to the Aether
 # usage meter holding that allowance in credits. Their AI is checked against
 # and recorded on the meter, never the pooled credit wallet, and is refused
-# with 402 once the period's allowance is used
+# with 402 once the period's allowance is used. backfeed (feedback triage
+# embeddings) is declared ahead of its rollout so its AI never touches the
+# wallet whenever its provisioning env is wired
 [billing.included_allowance_products]
 myfi = "ai_credits"
+backfeed = "ai_credits"
 
 [billing.managed_providers.openai]
 api_key = "{{ env.OPENAI_API_KEY }}"
