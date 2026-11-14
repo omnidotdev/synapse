@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
@@ -16,14 +16,27 @@ use crate::protocol::openai::{OpenAiModel, OpenAiModelList, OpenAiRequest, OpenA
 use crate::state::LlmState;
 use crate::types::{CompletionRequest, StreamEvent};
 
+/// Body limit for completion requests (32 MiB)
+///
+/// Requests carry inline base64 images and documents, so axum's 2 MiB default
+/// refused ordinary multimodal requests. This matches the upstream providers'
+/// own request size limits
+pub const REQUEST_BODY_LIMIT_BYTES: usize = 32 << 20;
+
 /// Build the LLM router with all endpoints
 pub fn llm_router(state: LlmState) -> Router {
     Router::new()
         // OpenAI-compatible endpoints
-        .route("/v1/chat/completions", routing::post(openai_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            routing::post(openai_chat_completions).layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/v1/models", routing::get(openai_list_models))
         // Anthropic-compatible endpoint
-        .route("/v1/messages", routing::post(anthropic_messages))
+        .route(
+            "/v1/messages",
+            routing::post(anthropic_messages).layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
+        )
         .with_state(state)
 }
 

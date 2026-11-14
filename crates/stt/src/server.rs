@@ -527,4 +527,63 @@ mod key_tests {
 
         assert_eq!(authorization_sent(&upstream).await, vec!["Bearer configured-key"]);
     }
+
+    /// A multipart transcription upload of `audio_bytes` through the real route
+    fn upload(audio_bytes: usize) -> http::Request<axum::body::Body> {
+        let boundary = "synapse-test-boundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper/whisper-1\r\n\
+                 --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\
+                 Content-Type: audio/wav\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend(std::iter::repeat_n(0u8, audio_bytes));
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        http::Request::post("/v1/audio/transcriptions")
+            .header(
+                http::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_above_the_2_mib_default_is_accepted() {
+        use tower::ServiceExt;
+
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+        let router = crate::endpoint_router().with_state(std::sync::Arc::new(whisper(&upstream)));
+
+        // 3 MiB of audio: over axum's 2 MiB default, under the 32 MiB limit
+        let audio_bytes = 3 << 20;
+        let response = router.oneshot(upload(audio_bytes)).await.unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let received = upstream.received_requests().await.unwrap_or_default();
+        assert_eq!(received.len(), 1);
+        assert!(
+            received[0].body.len() > audio_bytes,
+            "the whole file reached the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_above_32_mib_is_refused_before_any_upstream_call() {
+        use tower::ServiceExt;
+
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+        let router = crate::endpoint_router().with_state(std::sync::Arc::new(whisper(&upstream)));
+
+        let response = router.oneshot(upload((32 << 20) + 1)).await.unwrap();
+
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert!(upstream.received_requests().await.unwrap_or_default().is_empty());
+    }
 }

@@ -6,6 +6,8 @@
 
 #![allow(clippy::must_use_candidate, clippy::missing_errors_doc)]
 
+#[cfg(all(test, feature = "http"))]
+mod body_limit_tests;
 #[cfg(all(test, feature = "billing", feature = "cache"))]
 mod cache_tests;
 pub mod convert;

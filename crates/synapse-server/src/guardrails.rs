@@ -31,7 +31,7 @@ pub async fn guardrails_middleware(engine: Arc<GuardrailEngine>, request: Reques
 
     // Buffer the request body for inspection
     let (parts, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, 10 * 1024 * 1024).await else {
+    let Ok(bytes) = axum::body::to_bytes(body, synapse_llm::handler::REQUEST_BODY_LIMIT_BYTES).await else {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             axum::Json(serde_json::json!({
