@@ -88,7 +88,7 @@ impl Server {
         let api_key = synapse_core::byok_provider_key(
             context.billing_identity.as_ref(),
             &context.provider_keys,
-            provider.name(),
+            provider.key_provider(),
         )
         .map_err(|e| TtsError::InvalidRequest(e.to_string()))?;
 
@@ -453,6 +453,31 @@ mod key_tests {
             )
             .await
             .unwrap();
+
+        assert_eq!(
+            header_sent(&upstream, "authorization").await,
+            vec!["Bearer byok-openai"]
+        );
+    }
+
+    #[tokio::test]
+    async fn byok_request_on_a_custom_named_provider_runs_on_the_vendor_key() {
+        // A provider configured under its own name (`[tts.providers.voice]`,
+        // type `openai_tts`) still runs on the caller's `openai` key
+        let upstream = MockServer::start().await;
+        mount_audio(&upstream).await;
+
+        server(Box::new(OpenAiTtsProvider::new(
+            "voice".to_owned(),
+            SecretString::from("configured-key".to_owned()),
+            Some(format!("{}/v1", upstream.uri())),
+        )))
+        .synthesize(
+            request("voice/tts-1"),
+            &context(Some(BillingMode::Byok), &[("openai", "byok-openai")]),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             header_sent(&upstream, "authorization").await,

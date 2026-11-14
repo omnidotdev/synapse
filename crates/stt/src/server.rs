@@ -88,7 +88,7 @@ impl Server {
         let api_key = synapse_core::byok_provider_key(
             context.billing_identity.as_ref(),
             &context.provider_keys,
-            provider.name(),
+            provider.key_provider(),
         )
         .map_err(|e| SttError::InvalidRequest(e.to_string()))?;
 
@@ -448,19 +448,21 @@ mod key_tests {
     }
 
     #[tokio::test]
-    async fn byok_request_runs_on_the_callers_whisper_key() {
+    async fn byok_whisper_request_runs_on_the_callers_openai_key() {
+        // Whisper is an OpenAI API, and callers register their key under the
+        // vendor (`openai`), never under the gateway's provider name
         let upstream = MockServer::start().await;
         mount_transcript(&upstream).await;
 
         whisper(&upstream)
             .transcribe(
                 request("whisper/whisper-1"),
-                &context(Some(BillingMode::Byok), &[("whisper", "byok-whisper")]),
+                &context(Some(BillingMode::Byok), &[("openai", "byok-openai")]),
             )
             .await
             .unwrap();
 
-        assert_eq!(authorization_sent(&upstream).await, vec!["Bearer byok-whisper"]);
+        assert_eq!(authorization_sent(&upstream).await, vec!["Bearer byok-openai"]);
     }
 
     #[tokio::test]

@@ -88,7 +88,7 @@ impl Server {
         let api_key = synapse_core::byok_provider_key(
             context.billing_identity.as_ref(),
             &context.provider_keys,
-            provider.name(),
+            provider.key_provider(),
         )
         .map_err(|e| EmbeddingsError::InvalidRequest(e.to_string()))?;
 
@@ -352,9 +352,13 @@ mod key_tests {
     use crate::types::EmbeddingRequest;
 
     fn server(provider: &MockServer) -> Server {
+        named_server(provider, "openai")
+    }
+
+    fn named_server(provider: &MockServer, name: &str) -> Server {
         Server {
             providers: vec![Box::new(OpenAiEmbeddingsProvider::new(
-                "openai".to_owned(),
+                name.to_owned(),
                 SecretString::from("configured-key".to_owned()),
                 Some(format!("{}/v1", provider.uri())),
             ))],
@@ -429,6 +433,29 @@ mod key_tests {
         server(&provider)
             .embed(
                 &request(),
+                &context(Some(BillingMode::Byok), &[("openai", "byok-openai")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&provider).await, vec!["Bearer byok-openai"]);
+    }
+
+    #[tokio::test]
+    async fn byok_request_on_a_custom_named_provider_runs_on_the_vendor_key() {
+        // A provider configured under its own name still runs on the caller's
+        // key for the vendor it calls
+        let provider = MockServer::start().await;
+        mount_provider(&provider).await;
+
+        let request: EmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "model": "embed/text-embedding-3-small"
+        }))
+        .unwrap();
+        named_server(&provider, "embed")
+            .embed(
+                &request,
                 &context(Some(BillingMode::Byok), &[("openai", "byok-openai")]),
             )
             .await

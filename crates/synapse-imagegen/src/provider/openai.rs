@@ -230,4 +230,8 @@ impl ImageGenProvider for OpenAiImageGenProvider {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn key_provider(&self) -> &'static str {
+        "openai"
+    }
 }

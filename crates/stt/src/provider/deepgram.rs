@@ -132,4 +132,8 @@ impl SttProvider for DeepgramProvider {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn key_provider(&self) -> &'static str {
+        "deepgram"
+    }
 }

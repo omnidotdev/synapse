@@ -25,4 +25,8 @@ pub trait SttProvider: Send + Sync {
 
     /// Get the provider name
     fn name(&self) -> &str;
+
+    /// The upstream vendor whose API this provider calls (e.g. `openai` for
+    /// Whisper), which is the name a caller's BYOK key is registered under
+    fn key_provider(&self) -> &'static str;
 }
