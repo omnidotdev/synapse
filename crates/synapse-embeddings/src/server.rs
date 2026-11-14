@@ -83,7 +83,7 @@ impl Server {
                 .ok_or_else(|| EmbeddingsError::ProviderNotFound(provider_name.to_string()))?
         };
 
-        // Pre-request credit check for managed billing
+        // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
         {
             // Estimate tokens from input text length (~4 chars per token)
@@ -91,13 +91,13 @@ impl Server {
             #[allow(clippy::cast_precision_loss)]
             let estimated_cost = self.charge(context, provider.name(), estimated_tokens as f64 * 0.000_000_02); // ~$0.02/1M tokens
             if estimated_cost > 0.0 {
-                self.check_credits(context, estimated_cost).await?;
+                self.check_spend(context, estimated_cost).await?;
             }
         }
 
         let response = provider.embed(request, context).await?;
 
-        // Post-request billing: record usage and deduct credits
+        // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
         {
             let pname = if provider_name.is_empty() {
@@ -113,7 +113,7 @@ impl Server {
                 response.usage.prompt_tokens,
                 &request_id,
             );
-            self.deduct_credits(
+            self.settle_spend(
                 context,
                 pname,
                 &request.model,
@@ -126,9 +126,10 @@ impl Server {
         Ok(response)
     }
 
-    /// Check if the user has sufficient credits for the estimated cost
+    /// Check that the estimated cost is covered: by the credit wallet, or by
+    /// the product's included allowance when it includes AI in its tier
     #[cfg(feature = "billing")]
-    async fn check_credits(&self, context: &RequestContext, estimated_cost: f64) -> crate::error::Result<()> {
+    async fn check_spend(&self, context: &RequestContext, estimated_cost: f64) -> crate::error::Result<()> {
         let Some(ref client) = self.billing_client else {
             return Ok(());
         };
@@ -142,7 +143,7 @@ impl Server {
         }
 
         match client
-            .check_credits(
+            .check_spend(
                 &identity.app_id,
                 &identity.entity_type,
                 &identity.entity_id,
@@ -150,21 +151,19 @@ impl Server {
             )
             .await
         {
-            Ok(response) => {
-                if !response.sufficient {
-                    return Err(EmbeddingsError::InvalidRequest(format!(
-                        "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${:.4}",
-                        response.balance
-                    )));
-                }
-                Ok(())
+            Ok(synapse_billing::SpendCheck::Allowed) => Ok(()),
+            Ok(synapse_billing::SpendCheck::InsufficientCredits { balance }) => {
+                Err(EmbeddingsError::InvalidRequest(format!(
+                    "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"
+                )))
             }
+            Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(EmbeddingsError::AllowanceExhausted),
             Err(e) => match self.billing_fail_mode {
                 FailMode::Degraded => {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing embeddings request (degraded mode)"
+                        "spend check failed, allowing embeddings request (degraded mode)"
                     );
                     Ok(())
                 }
@@ -172,7 +171,7 @@ impl Server {
                     tracing::warn!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing embeddings request (fail-open mode)"
+                        "spend check failed, allowing embeddings request (fail-open mode)"
                     );
                     Ok(())
                 }
@@ -180,7 +179,7 @@ impl Server {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, rejecting embeddings request (fail-closed mode)"
+                        "spend check failed, rejecting embeddings request (fail-closed mode)"
                     );
                     Err(EmbeddingsError::BillingUnavailable)
                 }
@@ -222,9 +221,10 @@ impl Server {
         });
     }
 
-    /// Deduct credits after a successful embedding request
+    /// Charge the actual cost after a successful embedding request to the credit wallet, or to the
+    /// product's included allowance
     #[cfg(feature = "billing")]
-    async fn deduct_credits(
+    async fn settle_spend(
         &self,
         context: &RequestContext,
         provider_name: &str,
@@ -251,23 +251,22 @@ impl Server {
             return;
         }
 
-        let request = synapse_billing::CreditDeductRequest {
-            amount: actual_cost,
-            description: Some(format!("{provider_name}/{model_id}")),
-            idempotency_key: Some(request_id.to_owned()),
-            reference_type: Some("embedding".to_owned()),
-            reference_id: None,
+        let charge = synapse_billing::SpendCharge {
+            amount_usd: actual_cost,
+            description: format!("{provider_name}/{model_id}"),
+            idempotency_key: request_id.to_owned(),
+            reference_type: "embedding".to_owned(),
         };
 
         if let Err(e) = client
-            .deduct_credits(&identity.app_id, &identity.entity_type, &identity.entity_id, &request)
+            .settle_spend(&identity.app_id, &identity.entity_type, &identity.entity_id, &charge)
             .await
         {
             tracing::warn!(
                 error = %e,
                 entity_id = %identity.entity_id,
                 cost = actual_cost,
-                "failed to deduct credits after embedding"
+                "failed to charge usage after embedding"
             );
         }
     }
@@ -329,4 +328,139 @@ fn resolve_api_key(name: &str, config: &EmbeddingsProviderConfig) -> crate::erro
         .api_key
         .clone()
         .ok_or_else(|| EmbeddingsError::ConfigError(format!("API key required for embeddings provider '{name}'")))
+}
+
+#[cfg(all(test, feature = "billing"))]
+mod spend_tests {
+    use std::collections::HashMap;
+
+    use secrecy::SecretString;
+    use synapse_billing::{AetherClient, SpendPolicy};
+    use synapse_config::FailMode;
+    use synapse_core::{BillingIdentity, BillingMode, MarginPolicy, RequestContext};
+    use wiremock::matchers::{method, path, path_regex, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::Server;
+    use crate::error::EmbeddingsError;
+    use crate::provider::openai::OpenAiEmbeddingsProvider;
+    use crate::types::EmbeddingRequest;
+
+    fn server(provider: &MockServer, aether: &MockServer) -> Server {
+        let client = AetherClient::new(
+            reqwest::Url::parse(&format!("{}/", aether.uri())).unwrap(),
+            SecretString::from("aether-key".to_owned()),
+        )
+        .unwrap()
+        .with_spend_policy(SpendPolicy::new(HashMap::from([(
+            "myfi".to_owned(),
+            "ai_credits".to_owned(),
+        )])));
+
+        Server {
+            providers: vec![Box::new(OpenAiEmbeddingsProvider::new(
+                "openai".to_owned(),
+                SecretString::from("provider-key".to_owned()),
+                Some(format!("{}/v1", provider.uri())),
+            ))],
+            usage_recorder: None,
+            billing_client: Some(client),
+            billing_fail_mode: FailMode::Degraded,
+            margins: MarginPolicy::default(),
+        }
+    }
+
+    fn myfi_context() -> RequestContext {
+        let mut ctx = RequestContext::empty();
+        ctx.billing_identity = Some(BillingIdentity {
+            app_id: "myfi".to_owned(),
+            entity_type: "organization".to_owned(),
+            entity_id: "org_1".to_owned(),
+            mode: BillingMode::Managed,
+            plan: None,
+        });
+        ctx
+    }
+
+    // 4M chars estimate 1M tokens at $0.02/1M: $0.02 upstream, $0.04 retail
+    // at the 2.0 default product margin, 4 credits
+    fn request() -> EmbeddingRequest {
+        serde_json::from_value(serde_json::json!({
+            "input": "x".repeat(4_000_000),
+            "model": "openai/text-embedding-3-small"
+        }))
+        .unwrap()
+    }
+
+    async fn forbid_wallet(aether: &MockServer) {
+        Mock::given(path_regex(r"^/credits/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .named("an included-allowance product must never touch the credit wallet")
+            .mount(aether)
+            .await;
+    }
+
+    async fn mount_provider(provider: &MockServer, times: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{ "object": "embedding", "embedding": [0.1], "index": 0 }],
+                "model": "text-embedding-3-small",
+                "usage": { "prompt_tokens": 1_000_000, "total_tokens": 1_000_000 }
+            })))
+            .expect(times)
+            .mount(provider)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn allowance_product_is_checked_and_charged_in_credits_never_the_wallet() {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 1).await;
+        forbid_wallet(&aether).await;
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .and(query_param("additionalUsage", "4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "allowed": true })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/record"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({ "delta": 4.0 }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "eventId": "e" })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+
+        server(&provider, &aether)
+            .embed(&request(), &myfi_context())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exhausted_allowance_is_refused_with_402_before_the_provider_is_called() {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 0).await;
+        forbid_wallet(&aether).await;
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "allowed": false })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+
+        let err = server(&provider, &aether)
+            .embed(&request(), &myfi_context())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, EmbeddingsError::AllowanceExhausted));
+        assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+    }
 }

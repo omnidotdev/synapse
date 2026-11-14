@@ -83,7 +83,7 @@ impl Server {
                 .ok_or_else(|| SttError::ProviderNotFound(provider_name.to_string()))?
         };
 
-        // Pre-request credit check for managed billing
+        // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
         {
             // Estimate cost based on audio size (rough proxy: 1 second ~= 16KB at 16kHz 16-bit mono)
@@ -91,7 +91,7 @@ impl Server {
             let estimated_duration_secs = request.audio.len() as f64 / 16_000.0;
             let estimated_cost = self.charge(context, provider.name(), estimated_duration_secs * 0.0001); // ~$0.006/min
             if estimated_cost > 0.0 {
-                self.check_credits(context, estimated_cost).await?;
+                self.check_spend(context, estimated_cost).await?;
             }
         }
 
@@ -110,22 +110,23 @@ impl Server {
 
         let response = provider.transcribe(request, context).await?;
 
-        // Post-request billing: record usage and deduct credits
+        // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
         {
             let (ref pname, ref model_id, audio_bytes) = billing_meta;
             let request_id = uuid::Uuid::new_v4().to_string();
             self.record_usage(context, pname, model_id, audio_bytes, &request_id);
-            self.deduct_credits(context, pname, model_id, audio_bytes, &request_id)
+            self.settle_spend(context, pname, model_id, audio_bytes, &request_id)
                 .await;
         }
 
         Ok(response)
     }
 
-    /// Check if the user has sufficient credits for the estimated cost
+    /// Check that the estimated cost is covered: by the credit wallet, or by
+    /// the product's included allowance when it includes AI in its tier
     #[cfg(feature = "billing")]
-    async fn check_credits(&self, context: &RequestContext, estimated_cost: f64) -> crate::error::Result<()> {
+    async fn check_spend(&self, context: &RequestContext, estimated_cost: f64) -> crate::error::Result<()> {
         let Some(ref client) = self.billing_client else {
             return Ok(());
         };
@@ -139,7 +140,7 @@ impl Server {
         }
 
         match client
-            .check_credits(
+            .check_spend(
                 &identity.app_id,
                 &identity.entity_type,
                 &identity.entity_id,
@@ -147,21 +148,17 @@ impl Server {
             )
             .await
         {
-            Ok(response) => {
-                if !response.sufficient {
-                    return Err(SttError::InvalidRequest(format!(
-                        "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${:.4}",
-                        response.balance
-                    )));
-                }
-                Ok(())
-            }
+            Ok(synapse_billing::SpendCheck::Allowed) => Ok(()),
+            Ok(synapse_billing::SpendCheck::InsufficientCredits { balance }) => Err(SttError::InvalidRequest(format!(
+                "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"
+            ))),
+            Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(SttError::AllowanceExhausted),
             Err(e) => match self.billing_fail_mode {
                 FailMode::Degraded => {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing STT request (degraded mode)"
+                        "spend check failed, allowing STT request (degraded mode)"
                     );
                     Ok(())
                 }
@@ -169,7 +166,7 @@ impl Server {
                     tracing::warn!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing STT request (fail-open mode)"
+                        "spend check failed, allowing STT request (fail-open mode)"
                     );
                     Ok(())
                 }
@@ -177,7 +174,7 @@ impl Server {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, rejecting STT request (fail-closed mode)"
+                        "spend check failed, rejecting STT request (fail-closed mode)"
                     );
                     Err(SttError::BillingUnavailable)
                 }
@@ -219,9 +216,10 @@ impl Server {
         });
     }
 
-    /// Deduct credits after a successful transcription
+    /// Charge the actual cost after a successful transcription to the credit wallet, or to the
+    /// product's included allowance
     #[cfg(feature = "billing")]
-    async fn deduct_credits(
+    async fn settle_spend(
         &self,
         context: &RequestContext,
         provider_name: &str,
@@ -249,23 +247,22 @@ impl Server {
             return;
         }
 
-        let request = synapse_billing::CreditDeductRequest {
-            amount: actual_cost,
-            description: Some(format!("{provider_name}/{model_id}")),
-            idempotency_key: Some(request_id.to_owned()),
-            reference_type: Some("transcription".to_owned()),
-            reference_id: None,
+        let charge = synapse_billing::SpendCharge {
+            amount_usd: actual_cost,
+            description: format!("{provider_name}/{model_id}"),
+            idempotency_key: request_id.to_owned(),
+            reference_type: "transcription".to_owned(),
         };
 
         if let Err(e) = client
-            .deduct_credits(&identity.app_id, &identity.entity_type, &identity.entity_id, &request)
+            .settle_spend(&identity.app_id, &identity.entity_type, &identity.entity_id, &charge)
             .await
         {
             tracing::warn!(
                 error = %e,
                 entity_id = %identity.entity_id,
                 cost = actual_cost,
-                "failed to deduct credits after transcription"
+                "failed to charge usage after transcription"
             );
         }
     }

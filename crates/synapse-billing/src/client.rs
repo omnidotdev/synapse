@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::circuit::CircuitBreaker;
 use crate::error::BillingError;
+use crate::spend::{SpendCharge, SpendCheck, SpendPolicy, SpendTarget, usd_to_credits};
 use crate::types::{
     CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, EntitlementCheckResponse,
     EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
@@ -22,6 +23,7 @@ pub struct AetherClient {
     base_url: Url,
     service_api_key: SecretString,
     circuit: CircuitBreaker,
+    spend_policy: SpendPolicy,
 }
 
 impl AetherClient {
@@ -42,7 +44,109 @@ impl AetherClient {
             base_url,
             service_api_key,
             circuit: CircuitBreaker::new(),
+            spend_policy: SpendPolicy::default(),
         })
+    }
+
+    /// Route each product's spend per `policy` in [`Self::check_spend`] and
+    /// [`Self::settle_spend`] (every product bills the credit wallet by default)
+    #[must_use]
+    pub fn with_spend_policy(mut self, policy: SpendPolicy) -> Self {
+        self.spend_policy = policy;
+        self
+    }
+
+    /// Check whether an estimated managed spend is covered before serving it
+    ///
+    /// A wallet product checks its pooled credit balance (USD); an included
+    /// allowance product checks its allowance meter (credits) and never the
+    /// wallet
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Aether is unreachable or returns an error, for the
+    /// caller's fail mode to decide
+    pub async fn check_spend(
+        &self,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        estimated_usd: f64,
+    ) -> Result<SpendCheck, BillingError> {
+        match self.spend_policy.target(app_id) {
+            SpendTarget::Wallet => {
+                let response = self
+                    .check_credits(app_id, entity_type, entity_id, estimated_usd)
+                    .await?;
+                Ok(if response.sufficient {
+                    SpendCheck::Allowed
+                } else {
+                    SpendCheck::InsufficientCredits {
+                        balance: response.balance,
+                    }
+                })
+            }
+            SpendTarget::Allowance { meter_key } => {
+                let response = self
+                    .check_usage(app_id, entity_type, entity_id, meter_key, usd_to_credits(estimated_usd))
+                    .await?;
+                Ok(if response.allowed {
+                    SpendCheck::Allowed
+                } else {
+                    SpendCheck::AllowanceExhausted
+                })
+            }
+        }
+    }
+
+    /// Charge the actual managed spend of a served request
+    ///
+    /// A wallet product is deducted from its pooled credit balance (USD); an
+    /// included allowance product records the credits on its allowance meter
+    /// and never touches the wallet
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Aether is unreachable or returns an error
+    pub async fn settle_spend(
+        &self,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        charge: &SpendCharge,
+    ) -> Result<(), BillingError> {
+        match self.spend_policy.target(app_id) {
+            SpendTarget::Wallet => {
+                let request = CreditDeductRequest {
+                    amount: charge.amount_usd,
+                    description: Some(charge.description.clone()),
+                    idempotency_key: Some(charge.idempotency_key.clone()),
+                    reference_type: Some(charge.reference_type.clone()),
+                    reference_id: None,
+                };
+                self.deduct_credits(app_id, entity_type, entity_id, &request).await?;
+            }
+            SpendTarget::Allowance { meter_key } => {
+                let metadata = HashMap::from([
+                    ("description".to_owned(), charge.description.clone()),
+                    ("referenceType".to_owned(), charge.reference_type.clone()),
+                    ("amountUsd".to_owned(), charge.amount_usd.to_string()),
+                ]);
+                // Suffixed so the key never collides with the token and
+                // request meters a request records under the same id
+                self.record_usage(
+                    app_id,
+                    entity_type,
+                    entity_id,
+                    meter_key,
+                    usd_to_credits(charge.amount_usd),
+                    &format!("{}-allowance", charge.idempotency_key),
+                    metadata,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Record usage against a meter
@@ -394,8 +498,9 @@ impl std::fmt::Debug for AetherClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spend::{SpendCharge, SpendCheck, SpendPolicy};
 
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_client(base_url: &str) -> AetherClient {
@@ -615,6 +720,171 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), BillingError::Api { status: 503, .. }));
+    }
+
+    fn posture_client(base_url: &str) -> AetherClient {
+        test_client(base_url).with_spend_policy(SpendPolicy::new(HashMap::from([(
+            "myfi".to_owned(),
+            "ai_credits".to_owned(),
+        )])))
+    }
+
+    /// Fails the test if any wallet endpoint (credit check or deduct) is hit
+    async fn forbid_wallet_calls(server: &MockServer) {
+        Mock::given(path_regex(r"^/credits/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .named("an allowance product must never touch the credit wallet")
+            .mount(server)
+            .await;
+    }
+
+    fn charge(amount_usd: f64) -> SpendCharge {
+        SpendCharge {
+            amount_usd,
+            description: "anthropic/claude-haiku-5".to_owned(),
+            idempotency_key: "req-1".to_owned(),
+            reference_type: "completion".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_spend_for_an_allowance_product_checks_its_meter_in_credits() {
+        let server = MockServer::start().await;
+        forbid_wallet_calls(&server).await;
+
+        // $2.50 estimated retail spend is 250 credits
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .and(query_param("additionalUsage", "250"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": true, "current": 10.0, "limit": 300, "remaining": 290
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("myfi", "organization", "org_1", 2.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
+    }
+
+    #[tokio::test]
+    async fn check_spend_reports_an_exhausted_allowance() {
+        let server = MockServer::start().await;
+        forbid_wallet_calls(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": false, "current": 25.0, "limit": 25, "remaining": 0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("myfi", "organization", "org_1", 0.01).await.unwrap();
+
+        assert_eq!(check, SpendCheck::AllowanceExhausted);
+    }
+
+    #[tokio::test]
+    async fn check_spend_for_a_wallet_product_checks_credits_in_usd() {
+        let server = MockServer::start().await;
+
+        Mock::given(path_regex(r"^/usage/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .named("a wallet product must not check an allowance meter")
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/check"))
+            .and(query_param("amount", "2.5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": false, "balance": 1.25
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 2.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::InsufficientCredits { balance: 1.25 });
+    }
+
+    #[tokio::test]
+    async fn settle_spend_records_allowance_credits_instead_of_deducting() {
+        let server = MockServer::start().await;
+        forbid_wallet_calls(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/record"))
+            .and(body_partial_json(serde_json::json!({
+                "delta": 1.5,
+                "idempotencyKey": "req-1-allowance",
+                "metadata": {
+                    "description": "anthropic/claude-haiku-5",
+                    "referenceType": "completion",
+                    "amountUsd": "0.015"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "meterId": "m_1", "eventId": "e_1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        client
+            .settle_spend("myfi", "organization", "org_1", &charge(0.015))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn settle_spend_deducts_a_wallet_product_in_usd() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/credits/facet/user/usr_1/deduct"))
+            .and(body_partial_json(serde_json::json!({
+                "amount": 0.015,
+                "idempotencyKey": "req-1",
+                "referenceType": "completion",
+                "description": "anthropic/claude-haiku-5"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true, "balance": 0.985
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        client
+            .settle_spend("facet", "user", "usr_1", &charge(0.015))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_spend_surfaces_an_unreachable_aether_for_the_fail_mode() {
+        let client = posture_client("http://127.0.0.1:1/");
+
+        let result = client.check_spend("myfi", "organization", "org_1", 0.5).await;
+
+        assert!(matches!(result, Err(BillingError::Request(_))));
     }
 
     #[tokio::test]

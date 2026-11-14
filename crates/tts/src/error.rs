@@ -39,6 +39,11 @@ pub enum TtsError {
     #[error("billing service unavailable")]
     BillingUnavailable,
 
+    /// The product includes AI in its tier and this period's fair-use
+    /// allowance cannot cover the request. Never charged to the credit wallet
+    #[error("the included AI allowance for this period is used up")]
+    AllowanceExhausted,
+
     /// Internal server error
     /// If Some(message), it came from a provider and can be shown
     /// If None, it's an internal error and should not leak details
@@ -62,6 +67,7 @@ impl TtsError {
                 _ => StatusCode::BAD_GATEWAY,
             },
             Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
             Self::ConfigError(_) | Self::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -74,6 +80,7 @@ impl TtsError {
             Self::ProviderNotFound(_) => "not_found_error",
             Self::ConnectionError(_) | Self::ProviderApiError { .. } => "api_error",
             Self::BillingUnavailable => "billing_unavailable_error",
+            Self::AllowanceExhausted => "allowance_exhausted_error",
             Self::ConfigError(_) | Self::InternalError(_) => "internal_error",
         }
     }
@@ -116,5 +123,18 @@ impl IntoResponse for TtsError {
         };
 
         (status, Json(error_response)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exhausted_included_allowance_is_payment_required() {
+        let err = TtsError::AllowanceExhausted;
+
+        assert_eq!(err.status_code(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.error_type(), "allowance_exhausted_error");
     }
 }
