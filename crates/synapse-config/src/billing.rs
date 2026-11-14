@@ -51,6 +51,13 @@ pub struct BillingConfig {
     /// `product_margins` (the fleet retail markup)
     #[serde(default = "default_product_margin")]
     pub default_product_margin: f64,
+    /// Products whose managed AI is included in their plan tier, bounded by a
+    /// monthly fair-use allowance (Posture C), as app id to the Aether usage
+    /// meter holding that allowance in credits (e.g. `myfi = "ai_credits"`).
+    /// Their AI spend is checked against and recorded on that meter, never
+    /// the pooled credit wallet
+    #[serde(default)]
+    pub included_allowance_products: HashMap<String, String>,
     /// Behavior when Aether is unreachable
     #[serde(default)]
     pub fail_mode: FailMode,
@@ -190,6 +197,14 @@ fn check_margin(label: &str, margin: f64) -> Result<(), String> {
     }
 }
 
+/// Whether a meter key is safe as an Aether URL path segment
+fn is_meter_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 fn default_input_tokens_key() -> String {
     "input_tokens".to_owned()
 }
@@ -212,7 +227,9 @@ impl BillingConfig {
     /// # Errors
     ///
     /// Returns an error if managed mode is enabled but no providers are
-    /// configured, or if any margin would sell managed usage below cost
+    /// configured, if any margin would sell managed usage below cost, or if an
+    /// included-allowance product is the gateway's own or names a malformed
+    /// meter
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == OperatingMode::Managed && self.managed_providers.is_empty() {
             return Err("managed mode requires at least one managed provider".to_owned());
@@ -226,6 +243,20 @@ impl BillingConfig {
         }
         for (provider, config) in &self.managed_providers {
             check_margin(&format!("billing.managed_providers.{provider}.margin"), config.margin)?;
+        }
+        for (product, meter) in &self.included_allowance_products {
+            if product == &self.app_id {
+                return Err(format!(
+                    "billing.included_allowance_products.{product}: the gateway's own product bills its plans \
+                     through the credit wallet"
+                ));
+            }
+            if !is_meter_key(meter) {
+                return Err(format!(
+                    "billing.included_allowance_products.{product} must be a meter key of lowercase letters, \
+                     digits, and underscores, got {meter:?}"
+                ));
+            }
         }
         Ok(())
     }
@@ -673,6 +704,38 @@ mod tests {
         for extra in below_cost {
             assert!(parse(extra).validate().is_err(), "accepted: {extra}");
         }
+    }
+
+    #[test]
+    fn included_allowance_products_default_to_none() {
+        assert!(parse("").included_allowance_products.is_empty());
+    }
+
+    #[test]
+    fn deserialize_included_allowance_products() {
+        let config = parse(
+            r#"
+            [included_allowance_products]
+            myfi = "ai_credits"
+            "#,
+        );
+        assert_eq!(config.included_allowance_products["myfi"], "ai_credits");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_malformed_allowance_meter() {
+        for meter in ["", "ai credits", "ai/credits", "AI_CREDITS", "../x"] {
+            let config = parse(&format!("[included_allowance_products]\nmyfi = {meter:?}"));
+            assert!(config.validate().is_err(), "accepted meter {meter:?}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_the_gateway_own_product_as_an_allowance_product() {
+        // The gateway's own plans bill through the credit wallet
+        let config = parse("[included_allowance_products]\nsynapse = \"ai_credits\"");
+        assert!(config.validate().is_err());
     }
 
     #[test]

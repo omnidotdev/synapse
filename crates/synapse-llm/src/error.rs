@@ -40,6 +40,11 @@ pub enum LlmError {
     #[error("insufficient credits: {message}")]
     InsufficientCredits { message: String },
 
+    /// The product includes AI in its tier and this period's fair-use
+    /// allowance cannot cover the request. Never charged to the credit wallet
+    #[error("the included AI allowance for this period is used up")]
+    AllowanceExhausted,
+
     /// A managed (Omni-key) request named a model the gateway has no price
     /// for. Serving it would bill $0, so it is refused before the provider is
     /// called; the same model stays available with the caller's own key
@@ -82,7 +87,7 @@ impl HttpError for LlmError {
             Self::InvalidRequest(_) | Self::ModelNotPriced { .. } => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::InsufficientCredits { .. } => StatusCode::PAYMENT_REQUIRED,
+            Self::InsufficientCredits { .. } | Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
         }
     }
 
@@ -95,6 +100,7 @@ impl HttpError for LlmError {
             Self::Unauthorized => "authentication_error",
             Self::RateLimited { .. } => "rate_limit_error",
             Self::InsufficientCredits { .. } => "insufficient_credits_error",
+            Self::AllowanceExhausted => "allowance_exhausted_error",
             Self::BillingUnavailable => "billing_unavailable_error",
             Self::Internal(_) => "internal_error",
         }

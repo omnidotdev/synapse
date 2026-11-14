@@ -99,11 +99,12 @@ impl LlmState {
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
-        // Pre-request credit check for managed billing, priced on the resolved
-        // model (a managed request for an unpriced model is refused here)
+        // Pre-request spend check for managed billing (the credit wallet, or
+        // the product's included allowance), priced on the resolved model (a
+        // managed request for an unpriced model is refused here)
         #[cfg(feature = "billing")]
         if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
-            self.check_credits(&context, cost).await?;
+            self.check_spend(&context, cost).await?;
         }
 
         // Skip failover when the user explicitly selected a provider (e.g.
@@ -134,10 +135,10 @@ impl LlmState {
             );
         }
 
-        // Post-completion credit deduction based on actual usage
+        // Post-completion charge for actual usage
         #[cfg(feature = "billing")]
         if let Some(ref usage) = response.usage {
-            self.deduct_credits_for_usage(
+            self.settle_spend_for_usage(
                 &context,
                 &provider_name,
                 &model_id,
@@ -204,11 +205,12 @@ impl LlmState {
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
-        // Pre-request credit check for managed billing, priced on the resolved
-        // model (a managed request for an unpriced model is refused here)
+        // Pre-request spend check for managed billing (the credit wallet, or
+        // the product's included allowance), priced on the resolved model (a
+        // managed request for an unpriced model is refused here)
         #[cfg(feature = "billing")]
         if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
-            self.check_credits(&context, cost).await?;
+            self.check_spend(&context, cost).await?;
         }
 
         // Skip failover/cascade when the user explicitly selected a
@@ -260,9 +262,9 @@ impl LlmState {
                         &inner.margins,
                     );
 
-                    // Deduct credits for actual usage (fire-and-forget)
+                    // Charge actual usage (fire-and-forget)
                     if let Some(ref client) = billing_client {
-                        spawn_credit_deduction(
+                        spawn_spend_settlement(
                             client.clone(),
                             &ctx,
                             &prov,
@@ -1222,8 +1224,9 @@ impl LlmState {
         .map(Some)
     }
 
-    /// Check if the user has sufficient credits for the estimated cost
-    async fn check_credits(&self, context: &RequestContext, estimated_cost: f64) -> Result<(), LlmError> {
+    /// Check that the estimated cost is covered: by the credit wallet, or by
+    /// the product's included allowance when it includes AI in its tier
+    async fn check_spend(&self, context: &RequestContext, estimated_cost: f64) -> Result<(), LlmError> {
         let Some(ref client) = self.inner.billing_client else {
             return Ok(());
         };
@@ -1233,7 +1236,7 @@ impl LlmState {
         };
 
         match client
-            .check_credits(
+            .check_spend(
                 &identity.app_id,
                 &identity.entity_type,
                 &identity.entity_id,
@@ -1241,23 +1244,17 @@ impl LlmState {
             )
             .await
         {
-            Ok(response) => {
-                if !response.sufficient {
-                    return Err(LlmError::InsufficientCredits {
-                        message: format!(
-                            "estimated cost ${:.4} exceeds available balance ${:.4}",
-                            estimated_cost, response.balance
-                        ),
-                    });
-                }
-                Ok(())
-            }
+            Ok(synapse_billing::SpendCheck::Allowed) => Ok(()),
+            Ok(synapse_billing::SpendCheck::InsufficientCredits { balance }) => Err(LlmError::InsufficientCredits {
+                message: format!("estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"),
+            }),
+            Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(LlmError::AllowanceExhausted),
             Err(e) => match self.inner.billing_fail_mode {
                 FailMode::Degraded => {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing request under emergency token cap (degraded mode)"
+                        "spend check failed, allowing request under emergency token cap (degraded mode)"
                     );
                     Ok(())
                 }
@@ -1265,7 +1262,7 @@ impl LlmState {
                     tracing::warn!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, allowing request (fail-open mode)"
+                        "spend check failed, allowing request (fail-open mode)"
                     );
                     Ok(())
                 }
@@ -1273,7 +1270,7 @@ impl LlmState {
                     tracing::error!(
                         error = %e,
                         entity_id = %identity.entity_id,
-                        "credit check failed, rejecting request (fail-closed mode)"
+                        "spend check failed, rejecting request (fail-closed mode)"
                     );
                     Err(LlmError::BillingUnavailable)
                 }
@@ -1281,8 +1278,9 @@ impl LlmState {
         }
     }
 
-    /// Deduct credits after a successful completion based on actual usage
-    async fn deduct_credits_for_usage(
+    /// Charge a successful completion's actual usage to the credit wallet, or
+    /// to the product's included allowance
+    async fn settle_spend_for_usage(
         &self,
         context: &RequestContext,
         provider_name: &str,
@@ -1321,32 +1319,32 @@ impl LlmState {
             return;
         }
 
-        let request = synapse_billing::CreditDeductRequest {
-            amount: actual_cost,
-            description: Some(format!("{provider_name}/{model_id}")),
-            idempotency_key: Some(uuid::Uuid::new_v4().to_string()),
-            reference_type: Some("completion".to_owned()),
-            reference_id: None,
+        let charge = synapse_billing::SpendCharge {
+            amount_usd: actual_cost,
+            description: format!("{provider_name}/{model_id}"),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            reference_type: "completion".to_owned(),
         };
 
         if let Err(e) = client
-            .deduct_credits(&identity.app_id, &identity.entity_type, &identity.entity_id, &request)
+            .settle_spend(&identity.app_id, &identity.entity_type, &identity.entity_id, &charge)
             .await
         {
             tracing::warn!(
                 error = %e,
                 entity_id = %identity.entity_id,
                 cost = actual_cost,
-                "failed to deduct credits after completion"
+                "failed to charge usage after completion"
             );
         }
     }
 }
 
-/// Spawn a fire-and-forget credit deduction task for streaming usage events
+/// Spawn a fire-and-forget charge of a streamed completion's actual usage to
+/// the credit wallet, or to the product's included allowance
 #[cfg(feature = "billing")]
 #[allow(clippy::too_many_arguments)]
-fn spawn_credit_deduction(
+fn spawn_spend_settlement(
     client: synapse_billing::AetherClient,
     context: &RequestContext,
     provider_name: &str,
@@ -1385,20 +1383,19 @@ fn spawn_credit_deduction(
     let desc = format!("{provider_name}/{model_id}");
 
     tokio::spawn(async move {
-        let request = synapse_billing::CreditDeductRequest {
-            amount: actual_cost,
-            description: Some(desc),
-            idempotency_key: Some(uuid::Uuid::new_v4().to_string()),
-            reference_type: Some("completion".to_owned()),
-            reference_id: None,
+        let charge = synapse_billing::SpendCharge {
+            amount_usd: actual_cost,
+            description: desc,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            reference_type: "completion".to_owned(),
         };
 
-        if let Err(e) = client.deduct_credits(&app_id, &entity_type, &entity_id, &request).await {
+        if let Err(e) = client.settle_spend(&app_id, &entity_type, &entity_id, &charge).await {
             tracing::warn!(
                 error = %e,
                 entity_id = %entity_id,
                 cost = actual_cost,
-                "failed to deduct credits after streaming completion"
+                "failed to charge usage after streaming completion"
             );
         }
     });
