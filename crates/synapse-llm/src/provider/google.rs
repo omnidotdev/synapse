@@ -27,7 +27,6 @@ pub struct GoogleProvider {
     base_url: Url,
     api_key: Option<SecretString>,
     header_rules: Vec<HeaderRule>,
-    forward_authorization: bool,
 }
 
 impl GoogleProvider {
@@ -54,18 +53,21 @@ impl GoogleProvider {
             base_url,
             api_key: config.api_key.clone(),
             header_rules,
-            forward_authorization: config.forward_authorization,
         })
     }
 
-    /// Resolve the API key from config or request context
+    /// The key to send upstream
+    ///
+    /// The key the gateway resolved for this request (the caller's BYOK key
+    /// or the managed key) always wins; the configured key applies only when
+    /// none was resolved (no billing identity, or no managed key for this
+    /// provider)
     fn resolve_api_key(&self, context: &RequestContext) -> Option<String> {
-        if self.forward_authorization
-            && let Some(key) = &context.api_key
-        {
-            return Some(key.expose_secret().to_owned());
-        }
-        self.api_key.as_ref().map(|k| k.expose_secret().to_owned())
+        context
+            .api_key
+            .as_ref()
+            .or(self.api_key.as_ref())
+            .map(|k| k.expose_secret().to_owned())
     }
 
     /// Build the `generateContent` endpoint URL for a model

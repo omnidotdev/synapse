@@ -314,6 +314,7 @@ impl SynapseClient {
                     client_identity: None,
                     authentication: synapse_core::Authentication::default(),
                     billing_identity: None,
+                    provider_keys: std::collections::HashMap::new(),
                 };
 
                 let resp = server
@@ -372,6 +373,7 @@ impl SynapseClient {
                     client_identity: None,
                     authentication: synapse_core::Authentication::default(),
                     billing_identity: None,
+                    provider_keys: std::collections::HashMap::new(),
                 };
 
                 let resp = server

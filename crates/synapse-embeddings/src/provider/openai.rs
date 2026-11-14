@@ -77,7 +77,13 @@ struct OpenAiEmbeddingUsage {
 
 #[async_trait]
 impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
-    async fn embed(&self, request: &EmbeddingRequest, _context: &RequestContext) -> Result<EmbeddingResponse> {
+    async fn embed(
+        &self,
+        request: &EmbeddingRequest,
+        _context: &RequestContext,
+        api_key: Option<&SecretString>,
+    ) -> Result<EmbeddingResponse> {
+        let api_key = api_key.unwrap_or(&self.api_key);
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let model = Self::strip_model_prefix(&request.model).to_string();
 
@@ -97,7 +103,7 @@ impl EmbeddingsProvider for OpenAiEmbeddingsProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header("Authorization", format!("Bearer {}", api_key.expose_secret()))
             .json(&wire_request)
             .send()
             .await

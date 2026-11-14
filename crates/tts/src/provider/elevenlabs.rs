@@ -47,7 +47,9 @@ impl TtsProvider for ElevenLabsProvider {
         &self,
         request: SpeechRequest,
         _context: &RequestContext,
+        api_key: Option<&SecretString>,
     ) -> crate::error::Result<SpeechResponse> {
+        let api_key = api_key.unwrap_or(&self.api_key);
         let url = format!("{}/text-to-speech/{}", self.base_url, request.voice);
 
         tracing::debug!(
@@ -65,7 +67,7 @@ impl TtsProvider for ElevenLabsProvider {
         let response = self
             .client
             .post(&url)
-            .header("xi-api-key", self.api_key.expose_secret().to_string())
+            .header("xi-api-key", api_key.expose_secret().to_string())
             .json(&body)
             .send()
             .await

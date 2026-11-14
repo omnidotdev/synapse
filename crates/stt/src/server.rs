@@ -83,6 +83,15 @@ impl Server {
                 .ok_or_else(|| SttError::ProviderNotFound(provider_name.to_string()))?
         };
 
+        // A BYOK request is not metered, so it must run on the caller's own
+        // key, never the configured one
+        let api_key = synapse_core::byok_provider_key(
+            context.billing_identity.as_ref(),
+            &context.provider_keys,
+            provider.name(),
+        )
+        .map_err(|e| SttError::InvalidRequest(e.to_string()))?;
+
         // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
         {
@@ -108,7 +117,7 @@ impl Server {
             (pname, model_id, audio_bytes)
         };
 
-        let response = provider.transcribe(request, context).await?;
+        let response = provider.transcribe(request, context, api_key).await?;
 
         // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
@@ -333,4 +342,187 @@ fn resolve_api_key(name: &str, config: &SttProviderConfig) -> crate::error::Resu
         .api_key
         .clone()
         .ok_or_else(|| SttError::ConfigError(format!("API key required for STT provider '{name}'")))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use secrecy::SecretString;
+    use synapse_core::{BillingIdentity, BillingMode};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::Server;
+    use crate::error::SttError;
+    use crate::provider::{SttProvider, deepgram::DeepgramProvider, whisper::WhisperProvider};
+    use crate::request::RequestContext;
+    use crate::types::TranscriptionRequest;
+
+    fn server(provider: Box<dyn SttProvider>) -> Server {
+        Server {
+            providers: vec![provider],
+            #[cfg(feature = "billing")]
+            usage_recorder: None,
+            #[cfg(feature = "billing")]
+            billing_client: None,
+            #[cfg(feature = "billing")]
+            billing_fail_mode: synapse_config::FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
+        }
+    }
+
+    fn whisper(upstream: &MockServer) -> Server {
+        server(Box::new(WhisperProvider::new(
+            "whisper".to_owned(),
+            SecretString::from("configured-key".to_owned()),
+            Some(format!("{}/v1", upstream.uri())),
+        )))
+    }
+
+    fn deepgram(upstream: &MockServer) -> Server {
+        server(Box::new(DeepgramProvider::new(
+            "deepgram".to_owned(),
+            SecretString::from("configured-key".to_owned()),
+            Some(upstream.uri()),
+        )))
+    }
+
+    async fn mount_transcript(upstream: &MockServer) {
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "text": "hello",
+                "results": { "channels": [{ "alternatives": [{ "transcript": "hello" }] }] }
+            })))
+            .mount(upstream)
+            .await;
+    }
+
+    fn request(model: &str) -> TranscriptionRequest {
+        TranscriptionRequest {
+            audio: vec![0; 16],
+            filename: "a.wav".to_owned(),
+            content_type: "audio/wav".to_owned(),
+            model: model.to_owned(),
+            language: None,
+            prompt: None,
+            response_format: None,
+            temperature: None,
+        }
+    }
+
+    fn context(mode: Option<BillingMode>, keys: &[(&str, &str)]) -> RequestContext {
+        let (parts, ()) = http::Request::new(()).into_parts();
+        RequestContext {
+            parts,
+            // A client-supplied header key is never used upstream
+            api_key: Some(SecretString::from("client-header-key")),
+            client_identity: None,
+            authentication: synapse_core::Authentication::default(),
+            billing_identity: mode.map(|mode| BillingIdentity {
+                app_id: "synapse".to_owned(),
+                entity_type: "user".to_owned(),
+                entity_id: "usr_1".to_owned(),
+                mode,
+                plan: None,
+            }),
+            provider_keys: keys
+                .iter()
+                .map(|(name, key)| ((*name).to_owned(), SecretString::from(*key)))
+                .collect(),
+        }
+    }
+
+    async fn authorization_sent(upstream: &MockServer) -> Vec<String> {
+        upstream
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| {
+                r.headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn byok_request_runs_on_the_callers_whisper_key() {
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+
+        whisper(&upstream)
+            .transcribe(
+                request("whisper/whisper-1"),
+                &context(Some(BillingMode::Byok), &[("whisper", "byok-whisper")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&upstream).await, vec!["Bearer byok-whisper"]);
+    }
+
+    #[tokio::test]
+    async fn byok_request_runs_on_the_callers_deepgram_key() {
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+
+        deepgram(&upstream)
+            .transcribe(
+                request("deepgram/nova-2"),
+                &context(Some(BillingMode::Byok), &[("deepgram", "byok-deepgram")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&upstream).await, vec!["Token byok-deepgram"]);
+    }
+
+    #[tokio::test]
+    async fn byok_request_without_a_key_is_a_400_before_any_upstream_call() {
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+
+        let err = whisper(&upstream)
+            .transcribe(
+                request("whisper/whisper-1"),
+                &context(Some(BillingMode::Byok), &[("deepgram", "byok-other")]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SttError::InvalidRequest(_)), "{err:?}");
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(upstream.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_request_runs_on_the_configured_key() {
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+
+        whisper(&upstream)
+            .transcribe(
+                request("whisper/whisper-1"),
+                &context(Some(BillingMode::Managed), &[("whisper", "byok-ignored")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&upstream).await, vec!["Bearer configured-key"]);
+    }
+
+    #[tokio::test]
+    async fn request_without_a_billing_identity_runs_on_the_configured_key() {
+        let upstream = MockServer::start().await;
+        mount_transcript(&upstream).await;
+
+        whisper(&upstream)
+            .transcribe(request("whisper/whisper-1"), &context(None, &[]))
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&upstream).await, vec!["Bearer configured-key"]);
+    }
 }

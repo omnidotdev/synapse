@@ -596,7 +596,10 @@ components:
     ProviderApiKey:
       name: X-Provider-API-Key
       in: header
-      description: Override the configured provider API key (BYOK)
+      description: >-
+        Ignored, never sent upstream. A BYOK API key runs on the provider key
+        registered for it with `setProviderKey`; a managed API key runs on the
+        gateway's key
       schema:
         type: string
 

@@ -83,6 +83,15 @@ impl Server {
                 .ok_or_else(|| EmbeddingsError::ProviderNotFound(provider_name.to_string()))?
         };
 
+        // A BYOK request is not metered, so it must run on the caller's own
+        // key, never the configured one
+        let api_key = synapse_core::byok_provider_key(
+            context.billing_identity.as_ref(),
+            &context.provider_keys,
+            provider.name(),
+        )
+        .map_err(|e| EmbeddingsError::InvalidRequest(e.to_string()))?;
+
         // Pre-request spend check for managed billing
         #[cfg(feature = "billing")]
         {
@@ -95,7 +104,7 @@ impl Server {
             }
         }
 
-        let response = provider.embed(request, context).await?;
+        let response = provider.embed(request, context, api_key).await?;
 
         // Post-request billing: record usage and charge the actual cost
         #[cfg(feature = "billing")]
@@ -328,6 +337,149 @@ fn resolve_api_key(name: &str, config: &EmbeddingsProviderConfig) -> crate::erro
         .api_key
         .clone()
         .ok_or_else(|| EmbeddingsError::ConfigError(format!("API key required for embeddings provider '{name}'")))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use secrecy::SecretString;
+    use synapse_core::{BillingIdentity, BillingMode, RequestContext};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::Server;
+    use crate::error::EmbeddingsError;
+    use crate::provider::openai::OpenAiEmbeddingsProvider;
+    use crate::types::EmbeddingRequest;
+
+    fn server(provider: &MockServer) -> Server {
+        Server {
+            providers: vec![Box::new(OpenAiEmbeddingsProvider::new(
+                "openai".to_owned(),
+                SecretString::from("configured-key".to_owned()),
+                Some(format!("{}/v1", provider.uri())),
+            ))],
+            #[cfg(feature = "billing")]
+            usage_recorder: None,
+            #[cfg(feature = "billing")]
+            billing_client: None,
+            #[cfg(feature = "billing")]
+            billing_fail_mode: synapse_config::FailMode::default(),
+            #[cfg(feature = "billing")]
+            margins: synapse_core::MarginPolicy::default(),
+        }
+    }
+
+    async fn mount_provider(provider: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{ "object": "embedding", "embedding": [0.1], "index": 0 }],
+                "model": "text-embedding-3-small",
+                "usage": { "prompt_tokens": 1, "total_tokens": 1 }
+            })))
+            .mount(provider)
+            .await;
+    }
+
+    fn request() -> EmbeddingRequest {
+        serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "model": "openai/text-embedding-3-small"
+        }))
+        .unwrap()
+    }
+
+    fn context(mode: Option<BillingMode>, keys: &[(&str, &str)]) -> RequestContext {
+        let mut ctx = RequestContext::empty();
+        ctx.billing_identity = mode.map(|mode| BillingIdentity {
+            app_id: "synapse".to_owned(),
+            entity_type: "user".to_owned(),
+            entity_id: "usr_1".to_owned(),
+            mode,
+            plan: None,
+        });
+        ctx.provider_keys = keys
+            .iter()
+            .map(|(name, key)| ((*name).to_owned(), SecretString::from(*key)))
+            .collect();
+        ctx
+    }
+
+    async fn authorization_sent(provider: &MockServer) -> Vec<String> {
+        provider
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| {
+                r.headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn byok_request_runs_on_the_callers_key() {
+        let provider = MockServer::start().await;
+        mount_provider(&provider).await;
+
+        server(&provider)
+            .embed(
+                &request(),
+                &context(Some(BillingMode::Byok), &[("openai", "byok-openai")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&provider).await, vec!["Bearer byok-openai"]);
+    }
+
+    #[tokio::test]
+    async fn byok_request_without_a_key_is_a_400_before_any_upstream_call() {
+        let provider = MockServer::start().await;
+        mount_provider(&provider).await;
+
+        let err = server(&provider)
+            .embed(
+                &request(),
+                &context(Some(BillingMode::Byok), &[("anthropic", "byok-other")]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, EmbeddingsError::InvalidRequest(_)), "{err:?}");
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(authorization_sent(&provider).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_request_runs_on_the_configured_key() {
+        let provider = MockServer::start().await;
+        mount_provider(&provider).await;
+
+        server(&provider)
+            .embed(
+                &request(),
+                &context(Some(BillingMode::Managed), &[("openai", "byok-ignored")]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authorization_sent(&provider).await, vec!["Bearer configured-key"]);
+    }
+
+    #[tokio::test]
+    async fn request_without_a_billing_identity_runs_on_the_configured_key() {
+        let provider = MockServer::start().await;
+        mount_provider(&provider).await;
+
+        server(&provider).embed(&request(), &context(None, &[])).await.unwrap();
+
+        assert_eq!(authorization_sent(&provider).await, vec!["Bearer configured-key"]);
+    }
 }
 
 #[cfg(all(test, feature = "billing"))]

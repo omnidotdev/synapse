@@ -52,7 +52,9 @@ impl TtsProvider for OpenAiTtsProvider {
         &self,
         request: SpeechRequest,
         _context: &RequestContext,
+        api_key: Option<&SecretString>,
     ) -> crate::error::Result<SpeechResponse> {
+        let api_key = api_key.unwrap_or(&self.api_key);
         let url = format!("{}/audio/speech", self.base_url);
 
         tracing::debug!(
@@ -73,7 +75,7 @@ impl TtsProvider for OpenAiTtsProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header("Authorization", format!("Bearer {}", api_key.expose_secret()))
             .json(&body)
             .send()
             .await

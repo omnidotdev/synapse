@@ -37,6 +37,15 @@ pub trait Provider: Send + Sync {
     /// Advertised capabilities
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// Whether the provider authenticates with a per-request API key
+    ///
+    /// A provider that cannot (it signs with the gateway's own credentials)
+    /// must never serve a BYOK request, or the caller would run on the
+    /// gateway's account
+    fn accepts_request_api_key(&self) -> bool {
+        true
+    }
+
     /// Send a non-streaming completion request
     async fn complete(
         &self,

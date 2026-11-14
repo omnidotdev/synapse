@@ -41,7 +41,11 @@ pub struct LlmProviderConfig {
     /// Header rules for this provider
     #[serde(default)]
     pub headers: Vec<HeaderRuleConfig>,
-    /// Forward the client's bearer token to the provider
+    /// Deprecated and ignored, kept so existing configs still parse
+    ///
+    /// Providers always send the key the gateway resolves for the request
+    /// (the caller's BYOK key or the managed key) and fall back to `api_key`
+    /// only when none was resolved
     #[serde(default)]
     pub forward_authorization: bool,
     /// Rate limit for this provider (requests per window)
