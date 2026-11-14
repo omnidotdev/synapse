@@ -22,6 +22,29 @@ use synapse_core::MarginPolicy;
 /// Virtual model names that trigger smart routing
 pub(crate) const ROUTING_CLASSES: &[&str] = &["auto", "fast", "best", "cheap"];
 
+/// A stream of completion events
+pub(crate) type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>;
+
+/// The provider and model that served a request
+///
+/// Failover and cascade escalation can serve a request from a different model
+/// than the one resolved for it, so billing, metering, usage reports, and the
+/// cache follow this, never the resolved pair
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Served {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+}
+
+impl Served {
+    fn new(provider: &str, model: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        }
+    }
+}
+
 /// Shared state for LLM route handlers
 #[derive(Clone)]
 pub struct LlmState {
@@ -75,11 +98,15 @@ impl LlmState {
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
         // Pre-request spend check for managed billing (the credit wallet, or
-        // the product's included allowance), priced on the resolved model (a
-        // managed request for an unpriced model is refused here)
+        // the product's included allowance), priced on the most expensive
+        // model that may serve the request (a managed request for an unpriced
+        // model is refused here)
         #[cfg(feature = "billing")]
-        if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
-            self.check_spend(&context, cost).await?;
+        {
+            let candidates = self.serving_candidates(&provider_name, &model_id, explicit_provider, false);
+            if let Some(cost) = self.estimate_request_cost(&context, &candidates, &request)? {
+                self.check_spend(&context, cost).await?;
+            }
         }
 
         // The cache is consulted only after every check a live request gets
@@ -121,7 +148,7 @@ impl LlmState {
         // Skip failover when the user explicitly selected a provider (e.g.
         // "nvidia/moonshotai/kimi-k2.5"), surface the error instead of
         // silently routing to a different model
-        let response = if explicit_provider {
+        let (served, response) = if explicit_provider {
             self.complete_direct(&request, &context, &provider_name, &model_id, &provider)
                 .await?
         } else {
@@ -129,7 +156,7 @@ impl LlmState {
                 .await?
         };
 
-        self.record_served_usage(&context, &provider_name, &model_id, &response)
+        self.record_served_usage(&context, &served.provider, &served.model, &response)
             .await;
 
         // Store successful response in cache. A response without usage is
@@ -142,8 +169,8 @@ impl LlmState {
         {
             let entry = synapse_cache::CachedResponse {
                 body,
-                model: model_id.clone(),
-                provider: provider_name.clone(),
+                model: served.model,
+                provider: served.provider,
             };
             if let Err(e) = cache.put(key, &entry, None).await {
                 tracing::warn!(error = %e, "failed to cache response");
@@ -248,13 +275,7 @@ impl LlmState {
         &self,
         request: CompletionRequest,
         mut context: RequestContext,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
-        ),
-        LlmError,
-    > {
+    ) -> Result<(String, EventStream), LlmError> {
         let original_model = request.model.clone();
         let (provider_name, model_id, provider, explicit_provider) =
             self.resolve_provider(&request.model, &request, &context).await?;
@@ -262,21 +283,27 @@ impl LlmState {
         // Resolve API key based on billing mode
         self.resolve_api_key_for_request(&mut context, &provider_name)?;
 
+        let cascade = !explicit_provider && self.is_cascade_strategy(&original_model);
+
         // Pre-request spend check for managed billing (the credit wallet, or
-        // the product's included allowance), priced on the resolved model (a
-        // managed request for an unpriced model is refused here)
+        // the product's included allowance), priced on the most expensive
+        // model that may serve the request (a managed request for an unpriced
+        // model is refused here)
         #[cfg(feature = "billing")]
-        if let Some(cost) = self.estimate_request_cost(&context, &provider_name, &model_id, &request)? {
-            self.check_spend(&context, cost).await?;
+        {
+            let candidates = self.serving_candidates(&provider_name, &model_id, explicit_provider, cascade);
+            if let Some(cost) = self.estimate_request_cost(&context, &candidates, &request)? {
+                self.check_spend(&context, cost).await?;
+            }
         }
 
         // Skip failover/cascade when the user explicitly selected a
         // provider, surface the error instead of silently routing to a
         // different model
-        let (actual_model, stream) = if explicit_provider {
+        let (served, stream) = if explicit_provider {
             self.complete_stream_direct(&request, &context, &provider_name, &model_id, &provider)
                 .await?
-        } else if self.is_cascade_strategy(&original_model) {
+        } else if cascade {
             self.complete_stream_with_cascade(
                 &request,
                 &context,
@@ -291,17 +318,21 @@ impl LlmState {
                 .await?
         };
 
-        // Wrap stream to intercept usage events for billing and reporting
+        // Wrap stream to intercept usage events for billing and reporting,
+        // all on the model that served the stream
+        let actual_model = served.model.clone();
         let usage_reporter = context.parts.extensions.get::<synapse_auth::UsageReporter>().cloned();
-        let resolved_key = context.parts.extensions.get::<synapse_auth::ResolvedKey>().cloned();
+        let resolved_key = synapse_auth::resolved_key(&context.parts.extensions).cloned();
 
         #[cfg(feature = "billing")]
         if let Some(ref recorder) = self.inner.usage_recorder {
             let recorder = recorder.clone();
             let inner = Arc::clone(&self.inner);
             let ctx = context.clone();
-            let prov = provider_name.clone();
-            let mdl = model_id.clone();
+            let Served {
+                provider: prov,
+                model: mdl,
+            } = served;
             let reporter = usage_reporter;
             let resolved = resolved_key;
 
@@ -358,8 +389,10 @@ impl LlmState {
         // Non-billing path: still report usage for dashboard charts
         if let (Some(reporter), Some(resolved)) = (usage_reporter, resolved_key) {
             let inner = Arc::clone(&self.inner);
-            let prov = provider_name.clone();
-            let mdl = model_id.clone();
+            let Served {
+                provider: prov,
+                model: mdl,
+            } = served;
 
             let reporting_stream = stream.map(move |item| {
                 if let Ok(StreamEvent::Usage(ref usage)) = item {
@@ -718,7 +751,7 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<CompletionResponse, LlmError> {
+    ) -> Result<(Served, CompletionResponse), LlmError> {
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
 
@@ -734,7 +767,7 @@ impl LlmState {
                     input_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
                     output_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
                 });
-                Ok(response)
+                Ok((Served::new(provider_name, model_id), response))
             }
             Err(e) => {
                 self.inner.health.record_failure(provider_name);
@@ -767,13 +800,7 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
-        ),
-        LlmError,
-    > {
+    ) -> Result<(Served, EventStream), LlmError> {
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
 
@@ -789,7 +816,7 @@ impl LlmState {
                     input_tokens: None,
                     output_tokens: None,
                 });
-                Ok((model_id.to_owned(), stream))
+                Ok((Served::new(provider_name, model_id), stream))
             }
             Err(e) => {
                 self.inner.health.record_failure(provider_name);
@@ -821,7 +848,7 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<CompletionResponse, LlmError> {
+    ) -> Result<(Served, CompletionResponse), LlmError> {
         // Try primary provider
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
@@ -838,7 +865,7 @@ impl LlmState {
                     input_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
                     output_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
                 });
-                Ok(response)
+                Ok((Served::new(provider_name, model_id), response))
             }
             Err(e) => {
                 self.inner.health.record_failure(provider_name);
@@ -862,18 +889,22 @@ impl LlmState {
                     "primary provider failed, attempting failover"
                 );
 
-                let alternatives =
-                    ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups);
-
-                // max_attempts includes the primary, so remaining = max_attempts - 1
-                let remaining = self.inner.failover.max_attempts.saturating_sub(1);
                 let mut last_error = e;
 
-                for (alt_provider, alt_model) in alternatives.into_iter().take(remaining) {
+                for (alt_provider, alt_model) in self.failover_alternatives(provider_name, model_id) {
                     if !self.inner.health.is_available(&alt_provider) {
                         tracing::debug!(
                             provider = %alt_provider,
                             "skipping unhealthy provider"
+                        );
+                        continue;
+                    }
+
+                    if !self.can_bill(context, &alt_provider, &alt_model) {
+                        tracing::debug!(
+                            provider = %alt_provider,
+                            model = %alt_model,
+                            "skipping unpriced alternative for a managed request"
                         );
                         continue;
                     }
@@ -907,7 +938,7 @@ impl LlmState {
                     match alt_provider_impl.complete(&alt_req, &alt_context).await {
                         Ok(response) => {
                             self.inner.health.record_success(&alt_provider);
-                            return Ok(response);
+                            return Ok((Served::new(&alt_provider, &alt_model), response));
                         }
                         Err(e) => {
                             self.inner.health.record_failure(&alt_provider);
@@ -937,13 +968,7 @@ impl LlmState {
         provider_name: &str,
         model_id: &str,
         provider: &Arc<dyn Provider>,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
-        ),
-        LlmError,
-    > {
+    ) -> Result<(Served, EventStream), LlmError> {
         // Try primary provider
         let mut req = request.clone();
         model_id.clone_into(&mut req.model);
@@ -961,7 +986,7 @@ impl LlmState {
                     input_tokens: None,
                     output_tokens: None,
                 });
-                Ok((model_id.to_owned(), stream))
+                Ok((Served::new(provider_name, model_id), stream))
             }
             Err(e) => {
                 self.inner.health.record_failure(provider_name);
@@ -985,14 +1010,12 @@ impl LlmState {
                     "primary provider streaming failed, attempting failover"
                 );
 
-                let alternatives =
-                    ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups);
-
-                let remaining = self.inner.failover.max_attempts.saturating_sub(1);
                 let mut last_error = e;
 
-                for (alt_provider, alt_model) in alternatives.into_iter().take(remaining) {
-                    if !self.inner.health.is_available(&alt_provider) {
+                for (alt_provider, alt_model) in self.failover_alternatives(provider_name, model_id) {
+                    if !self.inner.health.is_available(&alt_provider)
+                        || !self.can_bill(context, &alt_provider, &alt_model)
+                    {
                         continue;
                     }
 
@@ -1025,7 +1048,7 @@ impl LlmState {
                     match alt_provider_impl.complete_stream(&alt_req, &alt_context).await {
                         Ok(stream) => {
                             self.inner.health.record_success(&alt_provider);
-                            return Ok((alt_model, stream));
+                            return Ok((Served::new(&alt_provider, &alt_model), stream));
                         }
                         Err(e) => {
                             self.inner.health.record_failure(&alt_provider);
@@ -1051,18 +1074,12 @@ impl LlmState {
         model_id: &str,
         provider: &Arc<dyn Provider>,
         cascade_config: &synapse_config::CascadeConfig,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>,
-        ),
-        LlmError,
-    > {
+    ) -> Result<(Served, EventStream), LlmError> {
         // Get the escalation model from the routing decision's alternatives
         let escalation = self.resolve_escalation_model(cascade_config)?;
 
         // Stream from the initial (cheap) model
-        let (initial_model, mut stream) = self
+        let (initial, mut stream) = self
             .complete_stream_with_failover(request, context, provider_name, model_id, provider)
             .await?;
 
@@ -1082,7 +1099,7 @@ impl LlmState {
                 // Timeout fired, commit to initial model
                 Err(_elapsed) => {
                     tracing::debug!(
-                        model = %initial_model,
+                        model = %initial.model,
                         buffered_bytes = buffer_bytes,
                         "cascade buffer timeout, committing to initial model"
                     );
@@ -1108,7 +1125,7 @@ impl LlmState {
                     // If buffer limit exceeded, commit
                     if buffer_bytes >= cascade_config.max_buffer_bytes {
                         tracing::debug!(
-                            model = %initial_model,
+                            model = %initial.model,
                             buffered_bytes = buffer_bytes,
                             "cascade buffer limit exceeded, committing to initial model"
                         );
@@ -1126,11 +1143,7 @@ impl LlmState {
 
         // If committed early (buffer limit or timeout), replay buffer + remaining stream
         if committed {
-            let remaining = stream;
-            let replay: Vec<Result<StreamEvent, LlmError>> = buffered_events.into_iter().map(Ok).collect();
-            let replay_stream = futures_util::stream::iter(replay);
-            let combined = replay_stream.chain(remaining);
-            return Ok((initial_model, Box::pin(combined)));
+            return Ok((initial, Box::pin(replay(buffered_events).chain(stream))));
         }
 
         // Estimate input tokens for confidence check
@@ -1145,22 +1158,32 @@ impl LlmState {
 
         if is_confident {
             tracing::debug!(
-                model = %initial_model,
+                model = %initial.model,
                 "cascade: initial model response is confident, replaying buffer"
             );
-            let replay: Vec<Result<StreamEvent, LlmError>> = buffered_events.into_iter().map(Ok).collect();
-            return Ok((initial_model, Box::pin(futures_util::stream::iter(replay))));
+            return Ok((initial, Box::pin(replay(buffered_events))));
         }
 
         // Not confident, escalate to stronger model
         tracing::info!(
-            initial_model = %initial_model,
+            initial_model = %initial.model,
             escalation_provider = %escalation.0,
             escalation_model = %escalation.1,
             "cascade: escalating to stronger model"
         );
 
         let (esc_provider_name, esc_model_id) = &escalation;
+
+        // A managed request is never escalated to a model it cannot be billed for
+        if !self.can_bill(context, esc_provider_name, esc_model_id) {
+            tracing::info!(
+                escalation_provider = %esc_provider_name,
+                escalation_model = %esc_model_id,
+                "cascade: escalation model is unpriced for a managed request, replaying buffer"
+            );
+            return Ok((initial, Box::pin(replay(buffered_events))));
+        }
+
         let esc_provider = self
             .inner
             .providers
@@ -1179,8 +1202,7 @@ impl LlmState {
                     error = %e,
                     "cascade: no usable key for the escalation provider, replaying buffer"
                 );
-                let replay: Vec<Result<StreamEvent, LlmError>> = buffered_events.into_iter().map(Ok).collect();
-                return Ok((initial_model, Box::pin(futures_util::stream::iter(replay))));
+                return Ok((initial, Box::pin(replay(buffered_events))));
             }
         };
 
@@ -1263,6 +1285,67 @@ impl LlmState {
         Ok(keyed)
     }
 
+    /// The alternatives failover may try once `provider_name`/`model_id`
+    /// fails, in order (`max_attempts` includes the primary)
+    fn failover_alternatives(&self, provider_name: &str, model_id: &str) -> Vec<(String, String)> {
+        if !self.inner.failover.enabled {
+            return Vec::new();
+        }
+        let remaining = self.inner.failover.max_attempts.saturating_sub(1);
+        ModelRouter::find_equivalents(provider_name, model_id, &self.inner.failover.equivalence_groups)
+            .into_iter()
+            .take(remaining)
+            .collect()
+    }
+
+    /// Every provider/model pair that may serve a request: the resolved pair
+    /// first, then the failover alternatives it can reach, and for a cascade
+    /// the escalation model and its alternatives
+    #[cfg(feature = "billing")]
+    fn serving_candidates(
+        &self,
+        provider_name: &str,
+        model_id: &str,
+        explicit_provider: bool,
+        cascade: bool,
+    ) -> Vec<(String, String)> {
+        let mut candidates = vec![(provider_name.to_owned(), model_id.to_owned())];
+        if explicit_provider {
+            return candidates;
+        }
+        candidates.extend(self.failover_alternatives(provider_name, model_id));
+        if cascade
+            && let Ok((esc_provider, esc_model)) = self.resolve_escalation_model(&self.inner.routing_config.cascade)
+        {
+            candidates.extend(self.failover_alternatives(&esc_provider, &esc_model));
+            candidates.push((esc_provider, esc_model));
+        }
+        candidates
+    }
+
+    /// Whether a request served by `provider_name`/`model_id` can be billed
+    ///
+    /// Always for an unmetered request. A managed request served by a model
+    /// with no price profile would bill nothing, so failover and escalation
+    /// never route a managed request to one
+    #[cfg_attr(not(feature = "billing"), allow(clippy::unused_self, clippy::missing_const_for_fn))]
+    fn can_bill(&self, context: &RequestContext, provider_name: &str, model_id: &str) -> bool {
+        #[cfg(feature = "billing")]
+        {
+            let managed = context
+                .billing_identity
+                .as_ref()
+                .is_some_and(|identity| identity.mode == synapse_core::BillingMode::Managed);
+            !managed || self.inner.model_registry.find(provider_name, model_id).is_some()
+        }
+
+        #[cfg(not(feature = "billing"))]
+        {
+            let _ = (context, provider_name, model_id);
+            true
+        }
+    }
+
     /// Check if the current routing strategy is cascade
     pub(crate) fn is_cascade_strategy(&self, model: &str) -> bool {
         if !self.inner.routing_config.enabled || !ROUTING_CLASSES.contains(&model) {
@@ -1271,6 +1354,11 @@ impl LlmState {
         let config = self.map_routing_class(model);
         matches!(config.strategy, synapse_config::RoutingStrategy::Cascade)
     }
+}
+
+/// Replay buffered stream events
+fn replay(events: Vec<StreamEvent>) -> impl Stream<Item = Result<StreamEvent, LlmError>> + Send {
+    futures_util::stream::iter(events.into_iter().map(Ok))
 }
 
 /// The tenant a cached response belongs to
@@ -1283,7 +1371,7 @@ impl LlmState {
 fn cache_scope(context: &RequestContext) -> Option<synapse_cache::CacheScope> {
     use synapse_cache::{CacheBillingMode, CacheScope};
 
-    let resolved = context.parts.extensions.get::<synapse_auth::ResolvedKey>();
+    let resolved = synapse_auth::resolved_key(&context.parts.extensions);
     let principal = resolved.map(|r| format!("{}:{}", r.user_id, r.api_key_id));
 
     if let Some(identity) = context.billing_identity.as_ref() {
@@ -1356,8 +1444,7 @@ impl LlmState {
     fn estimate_request_cost(
         &self,
         context: &RequestContext,
-        provider_name: &str,
-        model_id: &str,
+        candidates: &[(String, String)],
         request: &CompletionRequest,
     ) -> Result<Option<f64>, LlmError> {
         let Some(identity) = context.billing_identity.as_ref() else {
@@ -1373,22 +1460,33 @@ impl LlmState {
         // Estimate output tokens conservatively (use max_tokens if set, else default)
         let estimated_output = request.params.max_tokens.unwrap_or(1024) as usize;
 
-        let plan = context
-            .parts
-            .extensions
-            .get::<synapse_auth::ResolvedKey>()
-            .map(|r| r.plan.as_str());
-        let margin = self.inner.margins.resolve(Some(&identity.app_id), plan, provider_name);
+        let cost = |provider_name: &str, model_id: &str| {
+            let margin = self
+                .inner
+                .margins
+                .resolve(Some(&identity.app_id), identity.plan.as_deref(), provider_name);
+            managed_cost(
+                &self.inner.model_registry,
+                provider_name,
+                model_id,
+                estimated_input,
+                estimated_output,
+                margin,
+            )
+        };
 
-        managed_cost(
-            &self.inner.model_registry,
-            provider_name,
-            model_id,
-            estimated_input,
-            estimated_output,
-            margin,
-        )
-        .map(Some)
+        // The resolved model must be priced. An unpriced alternative is never
+        // served to a managed request (see `can_bill`), so it is left out
+        let Some(((provider_name, model_id), alternatives)) = candidates.split_first() else {
+            return Ok(None);
+        };
+        let primary = cost(provider_name, model_id)?;
+        let worst = alternatives
+            .iter()
+            .filter_map(|(provider_name, model_id)| cost(provider_name, model_id).ok())
+            .fold(primary, f64::max);
+
+        Ok(Some(worst))
     }
 
     /// Check that the estimated cost is covered: by the credit wallet, or by
@@ -1467,11 +1565,7 @@ impl LlmState {
             return;
         }
 
-        let plan = context
-            .parts
-            .extensions
-            .get::<synapse_auth::ResolvedKey>()
-            .map(|r| r.plan.as_str());
+        let plan = identity.plan.as_deref();
         let actual_cost = self
             .inner
             .model_registry
@@ -1529,11 +1623,7 @@ fn spawn_spend_settlement(
         return;
     }
 
-    let plan = context
-        .parts
-        .extensions
-        .get::<synapse_auth::ResolvedKey>()
-        .map(|r| r.plan.as_str());
+    let plan = identity.plan.as_deref();
     let actual_cost = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
         let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
         let margin = margins.resolve(Some(&identity.app_id), plan, provider_name);
@@ -1594,11 +1684,7 @@ fn dispatch_usage_event(
     let estimated_cost_usd = if is_byok {
         0.0
     } else {
-        let plan = context
-            .parts
-            .extensions
-            .get::<synapse_auth::ResolvedKey>()
-            .map(|r| r.plan.as_str());
+        let plan = identity.plan.as_deref();
         model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
             let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
             let margin = margins.resolve(Some(&identity.app_id), plan, provider_name);
@@ -1636,7 +1722,7 @@ fn dispatch_usage_report(
         return;
     };
 
-    let Some(resolved) = context.parts.extensions.get::<synapse_auth::ResolvedKey>() else {
+    let Some(resolved) = synapse_auth::resolved_key(&context.parts.extensions) else {
         return;
     };
 

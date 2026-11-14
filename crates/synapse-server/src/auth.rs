@@ -74,7 +74,7 @@ pub async fn auth_middleware(
                 }
             }
 
-            request.extensions_mut().insert(result);
+            synapse_auth::insert_resolved_key(request.extensions_mut(), result);
             request.extensions_mut().insert(billing_identity);
             if let Some(reporter) = usage_reporter {
                 request.extensions_mut().insert(reporter);

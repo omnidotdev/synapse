@@ -1,4 +1,6 @@
 mod auth;
+#[cfg(test)]
+mod auth_flow_tests;
 mod billing_identity;
 mod client_id;
 mod cors;
