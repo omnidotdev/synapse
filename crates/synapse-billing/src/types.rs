@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Request to record usage against a meter
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecordUsageRequest {
     /// Amount to increment
     pub delta: f64,
@@ -78,6 +79,7 @@ pub struct EntitlementsResponse {
 
 /// Request to check credit balance sufficiency
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreditCheckRequest {
     /// Amount of credits required
     pub amount: f64,
@@ -95,6 +97,7 @@ pub struct CreditCheckResponse {
 
 /// Request to deduct credits
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreditDeductRequest {
     /// Amount to deduct
     pub amount: f64,
@@ -123,4 +126,41 @@ pub struct CreditDeductResponse {
     /// Transaction ID
     #[serde(default, alias = "transactionId")]
     pub transaction_id: Option<String>,
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    // Aether's routes read camelCase bodies and ignore unknown keys, so a
+    // snake_case field is silently dropped (the idempotency key included)
+    #[test]
+    fn deduct_request_uses_aether_camel_case() {
+        let body = serde_json::to_value(CreditDeductRequest {
+            amount: 1.5,
+            description: Some("x".to_owned()),
+            idempotency_key: Some("k".to_owned()),
+            reference_type: Some("completion".to_owned()),
+            reference_id: Some("r".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(body["idempotencyKey"], "k");
+        assert_eq!(body["referenceType"], "completion");
+        assert_eq!(body["referenceId"], "r");
+        assert!(body.get("idempotency_key").is_none());
+    }
+
+    #[test]
+    fn record_usage_request_uses_aether_camel_case() {
+        let body = serde_json::to_value(RecordUsageRequest {
+            delta: 1.0,
+            idempotency_key: "k".to_owned(),
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+
+        assert_eq!(body["idempotencyKey"], "k");
+        assert!(body.get("idempotency_key").is_none());
+    }
 }
