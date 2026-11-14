@@ -63,10 +63,49 @@ fn prod_config_declares_product_model_policies() {
         ]
     );
     assert_eq!(keystone.default_model, "anthropic/claude-sonnet-5-5");
-    // Beacon's free default is Haiku-class
-    assert_eq!(billing.products["beacon"].default_model, "anthropic/claude-haiku-5-5");
-    for product in ["facet", "creator", "myfi"] {
-        assert!(billing.products.contains_key(product), "{product} has a model policy");
+    // Beacon's free default is Haiku-class; its picker offers the current
+    // Claude line only, cheapest first
+    let beacon = &billing.products["beacon"];
+    assert_eq!(beacon.default_model, "anthropic/claude-haiku-5-5");
+    assert_eq!(
+        beacon.models,
+        [
+            "anthropic/claude-haiku-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-opus-5-5"
+        ]
+    );
+
+    // Facet runs Sonnet 5.5 (its configured model and fallback); Opus 5.5 is
+    // the documented max-quality override
+    let facet = &billing.products["facet"];
+    assert_eq!(facet.default_model, "anthropic/claude-sonnet-5-5");
+    assert_eq!(
+        facet.models,
+        ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
+    );
+
+    // myfi sends `auto` for categorization, on Haiku 5.5 (an included allowance)
+    let myfi = &billing.products["myfi"];
+    assert_eq!(myfi.default_model, "anthropic/claude-haiku-5-5");
+    assert_eq!(myfi.models, ["anthropic/claude-haiku-5-5"]);
+
+    assert!(billing.products.contains_key("creator"), "creator has a model policy");
+
+    // No product other than creator (which still sends them) is offered a
+    // retired-generation model
+    let retired = [
+        "anthropic/claude-sonnet-4-5-20250929",
+        "anthropic/claude-haiku-4-5-20251001",
+        "anthropic/claude-opus-4-6",
+    ];
+    for (product, policy) in &billing.products {
+        if product == "creator" {
+            continue;
+        }
+        for model in &policy.models {
+            assert!(!retired.contains(&model.as_str()), "{product} still offers {model}");
+        }
     }
 
     // Smart routing's threshold models are current, priced models
