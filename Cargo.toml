@@ -110,7 +110,10 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = "0.5.3"
 tower-http = "0.6.8"
-agent-core = "0.1.0"
+# Omni agent-core (not the unrelated crates.io crate of the same name), the
+# same git source its consumers (cli, beacon) depend on so the `LlmProvider`
+# trait unifies
+agent-core = { git = "https://github.com/omnidotdev/agent-core.git" }
 url = "2.5.8"
 uuid = "1.23.0"
 

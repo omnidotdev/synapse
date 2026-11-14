@@ -76,7 +76,8 @@ fn to_chat_request(req: &CompletionRequest) -> ChatRequest {
                             ContentBlock::Text { text } => {
                                 messages.push(Message::user(text));
                             }
-                            _ => {}
+                            // A user turn carries no tool calls
+                            ContentBlock::ToolUse { .. } => {}
                         }
                     }
                 }
@@ -105,7 +106,8 @@ fn to_chat_request(req: &CompletionRequest) -> ChatRequest {
                                     },
                                 });
                             }
-                            _ => {}
+                            // An assistant turn carries no tool results
+                            ContentBlock::ToolResult { .. } => {}
                         }
                     }
 
@@ -167,9 +169,9 @@ fn to_completion_event(event: ChatEvent) -> CompletionEvent {
         },
         ChatEvent::Done { finish_reason, usage } => CompletionEvent::Done {
             stop_reason: finish_reason.map(|r| match r.as_str() {
-                "stop" => StopReason::EndTurn,
                 "tool_calls" => StopReason::ToolUse,
                 "length" => StopReason::MaxTokens,
+                // `stop` and anything unrecognized end the turn
                 _ => StopReason::EndTurn,
             }),
             usage: usage.map(|u| Usage {
