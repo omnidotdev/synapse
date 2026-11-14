@@ -380,25 +380,17 @@ backfeed = "ai_credits"
 models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
 default_model = "anthropic/claude-sonnet-5-5"
 
-# Sonnet 4.5 is facet-api's configured fallback model
+# facet-api runs Sonnet 5.5 (FACET_AI_MODEL and its fallback, set in IaC);
+# Opus 5.5 is the documented max-quality override
 [billing.products.facet]
-models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-4-5-20250929"]
+models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
 default_model = "anthropic/claude-sonnet-5-5"
 
-# Haiku-class default (D5); paid tiers pick Sonnet explicitly
+# Haiku-class default (D5); paid tiers pick Sonnet explicitly. The picker
+# offers the current Claude line, cheapest first: older and other-vendor
+# models cost more for less and are no longer listed
 [billing.products.beacon]
-models = [
-  "anthropic/claude-sonnet-5-5",
-  "anthropic/claude-opus-5-5",
-  "anthropic/claude-haiku-5-5",
-  "anthropic/claude-opus-4-6",
-  "anthropic/claude-sonnet-4-5-20250929",
-  "anthropic/claude-haiku-4-5-20251001",
-  "openai/gpt-4o",
-  "openai/gpt-4o-mini",
-  "openai/o3-mini",
-  "nvidia/moonshotai/kimi-k2.5",
-]
+models = ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
 default_model = "anthropic/claude-haiku-5-5"
 
 [billing.products.creator]
@@ -410,10 +402,12 @@ models = [
 ]
 default_model = "openai/gpt-4o-mini"
 
-# Bulk categorization (Haiku) and interactive suggestions (Opus)
+# myfi sends `auto` for bulk and interactive categorization. Picking two
+# accounts from a chart is well within Haiku 5.5, and myfi's AI is an included
+# allowance, so no larger model is offered
 [billing.products.myfi]
-models = ["anthropic/claude-haiku-4-5-20251001", "anthropic/claude-opus-4-6"]
-default_model = "anthropic/claude-haiku-4-5-20251001"
+models = ["anthropic/claude-haiku-5-5"]
+default_model = "anthropic/claude-haiku-5-5"
 
 [billing.managed_providers.openai]
 api_key = "{{ env.OPENAI_API_KEY }}"
