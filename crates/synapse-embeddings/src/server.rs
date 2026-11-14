@@ -98,7 +98,11 @@ impl Server {
             // Estimate tokens from input text length (~4 chars per token)
             let estimated_tokens: usize = request.input.as_vec().iter().map(|s| s.len() / 4).sum();
             #[allow(clippy::cast_precision_loss)]
-            let estimated_cost = self.charge(context, provider.name(), estimated_tokens as f64 * 0.000_000_02); // ~$0.02/1M tokens
+            let estimated_cost = self.charge(
+                context,
+                provider.key_provider(),
+                estimated_tokens as f64 * EMBEDDING_USD_PER_TOKEN,
+            );
             if estimated_cost > 0.0 {
                 self.check_spend(context, estimated_cost).await?;
             }
@@ -115,21 +119,27 @@ impl Server {
                 provider_name
             };
             let request_id = uuid::Uuid::new_v4().to_string();
-            self.record_usage(
+            let prompt_tokens = response.usage.prompt_tokens;
+            // Marked up by the vendor the provider calls, like its BYOK key
+            let charged_usd = self.charge(
                 context,
-                pname,
-                &request.model,
-                response.usage.prompt_tokens,
-                &request_id,
+                provider.key_provider(),
+                f64::from(prompt_tokens) * EMBEDDING_USD_PER_TOKEN,
             );
-            self.settle_spend(
-                context,
-                pname,
-                &request.model,
-                response.usage.prompt_tokens,
-                &request_id,
-            )
-            .await;
+            self.record_usage(context, pname, &request.model, prompt_tokens, &request_id);
+            self.settle_spend(context, pname, &request.model, charged_usd, &request_id)
+                .await;
+            synapse_core::report_served_usage(
+                &context.parts.extensions,
+                synapse_core::ServedUsage {
+                    modality: synapse_core::Modality::Embedding,
+                    provider: pname.to_owned(),
+                    model: bare_model(&request.model).to_owned(),
+                    input_tokens: prompt_tokens,
+                    output_tokens: 0,
+                    charged_usd: synapse_billing::round_up_to_ledger_precision(charged_usd),
+                },
+            );
         }
 
         Ok(response)
@@ -238,7 +248,7 @@ impl Server {
         context: &RequestContext,
         provider_name: &str,
         model_id: &str,
-        prompt_tokens: u32,
+        actual_cost: f64,
         request_id: &str,
     ) {
         let Some(ref client) = self.billing_client else {
@@ -252,9 +262,6 @@ impl Server {
         if identity.mode != synapse_core::BillingMode::Managed {
             return;
         }
-
-        // Cost based on token count (~$0.02/1M tokens for text-embedding-3-small)
-        let actual_cost = self.charge(context, provider_name, f64::from(prompt_tokens) * 0.000_000_02);
 
         if actual_cost <= 0.0 {
             return;
@@ -279,6 +286,16 @@ impl Server {
             );
         }
     }
+}
+
+/// Upstream cost per embedded token (~$0.02/1M tokens, text-embedding-3-small)
+#[cfg(feature = "billing")]
+const EMBEDDING_USD_PER_TOKEN: f64 = 0.000_000_02;
+
+/// Model id without its "provider/" prefix
+#[cfg(feature = "billing")]
+fn bare_model(model: &str) -> &str {
+    model.split_once('/').map_or(model, |(_, name)| name)
 }
 
 /// Builder for constructing the embeddings server from configuration

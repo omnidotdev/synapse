@@ -230,16 +230,48 @@ impl LlmState {
         )
         .await;
 
-        // Report usage to synapse-api for dashboard charts
-        dispatch_usage_report(
-            context,
-            provider_name,
-            model_id,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            &self.inner.model_registry,
-            &self.inner.margins,
+        // Report usage to synapse-api for dashboard charts and reconciliation
+        synapse_core::report_served_usage(
+            &context.parts.extensions,
+            self.served_usage(context, provider_name, model_id, usage),
         );
+    }
+
+    /// The usage report for a served completion attempt, carrying exactly
+    /// what the attempt was charged
+    fn served_usage(
+        &self,
+        context: &RequestContext,
+        provider_name: &str,
+        model_id: &str,
+        usage: &Usage,
+    ) -> synapse_core::ServedUsage {
+        synapse_core::ServedUsage {
+            modality: synapse_core::Modality::Completion,
+            provider: provider_name.to_owned(),
+            model: model_id.to_owned(),
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            charged_usd: self
+                .request_cost(context, provider_name, model_id, usage)
+                .map_or(0.0, |cost| cost.cost_usd),
+        }
+    }
+
+    /// Report a stream's served usage once its final usage arrives
+    fn with_usage_report(&self, stream: EventStream, context: &RequestContext, served: &Served) -> EventStream {
+        let Some(sink) = context.parts.extensions.get::<synapse_core::UsageReportSink>().cloned() else {
+            return stream;
+        };
+        let this = self.clone();
+        let ctx = context.clone();
+        let served = served.clone();
+        Box::pin(stream.map(move |item| {
+            if let Ok(StreamEvent::Usage(ref usage)) = item {
+                sink.report(this.served_usage(&ctx, &served.provider, &served.model, usage));
+            }
+            item
+        }))
     }
 
     /// What a served attempt cost the caller, for reporting on its usage
@@ -398,11 +430,13 @@ impl LlmState {
         // Report what the request cost on the stream's final usage
         let stream = self.with_reported_cost(stream, &context, &served, prior_cost);
 
-        // Wrap stream to intercept usage events for billing and reporting,
-        // all on the model that served the stream
+        // Report the served usage to synapse-api for dashboard charts and
+        // reconciliation, on the model that served the stream
+        let stream = self.with_usage_report(stream, &context, &served);
+
+        // Wrap stream to intercept usage events for billing, on the model that
+        // served the stream
         let actual_model = served.model.clone();
-        let usage_reporter = context.parts.extensions.get::<synapse_auth::UsageReporter>().cloned();
-        let resolved_key = synapse_auth::resolved_key(&context.parts.extensions).cloned();
 
         #[cfg(feature = "billing")]
         if let Some(ref recorder) = self.inner.usage_recorder {
@@ -413,8 +447,6 @@ impl LlmState {
                 provider: prov,
                 model: mdl,
             } = served;
-            let reporter = usage_reporter;
-            let resolved = resolved_key;
 
             let billing_client = inner.billing_client.clone();
             let metered_stream = stream.map(move |item| {
@@ -443,54 +475,11 @@ impl LlmState {
                             &inner.margins,
                         );
                     }
-
-                    // Report usage to synapse-api for dashboard charts
-                    if let Some(ref reporter) = reporter
-                        && let Some(ref resolved) = resolved
-                    {
-                        record_usage_report(
-                            reporter,
-                            resolved,
-                            &prov,
-                            &mdl,
-                            usage.prompt_tokens,
-                            usage.completion_tokens,
-                            &inner.model_registry,
-                            &inner.margins,
-                        );
-                    }
                 }
                 item
             });
 
             return Ok((actual_model, Box::pin(metered_stream)));
-        }
-
-        // Non-billing path: still report usage for dashboard charts
-        if let (Some(reporter), Some(resolved)) = (usage_reporter, resolved_key) {
-            let inner = Arc::clone(&self.inner);
-            let Served {
-                provider: prov,
-                model: mdl,
-            } = served;
-
-            let reporting_stream = stream.map(move |item| {
-                if let Ok(StreamEvent::Usage(ref usage)) = item {
-                    record_usage_report(
-                        &reporter,
-                        &resolved,
-                        &prov,
-                        &mdl,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        &inner.model_registry,
-                        &inner.margins,
-                    );
-                }
-                item
-            });
-
-            return Ok((actual_model, Box::pin(reporting_stream)));
         }
 
         Ok((actual_model, stream))
@@ -1881,79 +1870,6 @@ fn dispatch_usage_event(
         output_tokens: metered_output,
         estimated_cost_usd,
         idempotency_key,
-    });
-}
-
-/// Dispatch a usage event to the synapse-api usage reporter for dashboard charts
-#[allow(clippy::too_many_arguments)]
-fn dispatch_usage_report(
-    context: &RequestContext,
-    provider_name: &str,
-    model_id: &str,
-    input_tokens: u32,
-    output_tokens: u32,
-    model_registry: &ModelRegistry,
-    margins: &MarginPolicy,
-) {
-    let Some(reporter) = context.parts.extensions.get::<synapse_auth::UsageReporter>() else {
-        return;
-    };
-
-    let Some(resolved) = synapse_auth::resolved_key(&context.parts.extensions) else {
-        return;
-    };
-
-    record_usage_report(
-        reporter,
-        resolved,
-        provider_name,
-        model_id,
-        input_tokens,
-        output_tokens,
-        model_registry,
-        margins,
-    );
-}
-
-/// Build and record a usage event to synapse-api
-#[allow(clippy::too_many_arguments)]
-fn record_usage_report(
-    reporter: &synapse_auth::UsageReporter,
-    resolved: &synapse_auth::ResolvedKey,
-    provider_name: &str,
-    model_id: &str,
-    input_tokens: u32,
-    output_tokens: u32,
-    model_registry: &ModelRegistry,
-    margins: &MarginPolicy,
-) {
-    let estimated_cost_usd = model_registry.find(provider_name, model_id).map_or(0.0, |profile| {
-        let base = profile.estimate_cost(input_tokens as usize, output_tokens as usize);
-        let margin = margins.resolve(resolved.app_id.as_deref(), Some(&resolved.plan), provider_name);
-        base * margin
-    });
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cost_cents = if estimated_cost_usd.is_finite() && estimated_cost_usd >= 0.0 {
-        (estimated_cost_usd * 100.0).round() as u32
-    } else {
-        0
-    };
-
-    let mode = match resolved.mode {
-        synapse_auth::KeyMode::Byok => "byok",
-        synapse_auth::KeyMode::Managed | synapse_auth::KeyMode::Manual => "managed",
-    };
-
-    reporter.record(synapse_auth::UsageEvent {
-        user_id: resolved.user_id.clone(),
-        workspace_id: resolved.workspace_id.clone(),
-        api_key_id: resolved.api_key_id.clone(),
-        provider: provider_name.to_owned(),
-        model: model_id.to_owned(),
-        input_tokens,
-        output_tokens,
-        cost_cents,
-        mode: mode.to_owned(),
     });
 }
 
