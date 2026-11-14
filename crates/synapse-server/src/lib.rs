@@ -1,7 +1,6 @@
 mod auth;
 #[cfg(test)]
 mod auth_flow_tests;
-mod billing_identity;
 mod client_id;
 mod cors;
 mod csrf;
@@ -51,6 +50,14 @@ impl Server {
         if config.server.tls.is_some() {
             tracing::warn!(
                 "TLS configuration is present but application-level TLS is not supported; use a reverse proxy or ingress controller for TLS termination"
+            );
+        }
+
+        // The gateway authenticates by API key only; nothing validates a JWT,
+        // so an `[server.oauth]` block grants no access and attributes no usage
+        if config.server.oauth.is_some() {
+            tracing::warn!(
+                "server.oauth is set but JWT authentication is not supported and the setting has no effect; clients authenticate with Synapse API keys"
             );
         }
 
@@ -337,18 +344,6 @@ impl Server {
             app = app.layer(axum::middleware::from_fn(move |req, next| {
                 let state = ent_state.clone();
                 async move { entitlement::entitlement_middleware(state, req, next).await }
-            }));
-        }
-
-        // Billing identity from JWT, fallback for when auth middleware does not set BillingIdentity
-        // (e.g. JWT-authenticated requests that bypass API key auth)
-        if let Some(ref billing_config) = config.billing
-            && billing_config.enabled
-        {
-            let bc = billing_config.clone();
-            app = app.layer(axum::middleware::from_fn(move |req, next| {
-                let config = bc.clone();
-                async move { billing_identity::billing_identity_middleware(config, req, next).await }
             }));
         }
 

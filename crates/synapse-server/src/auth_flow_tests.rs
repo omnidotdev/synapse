@@ -1,6 +1,7 @@
 //! A request authenticated by API key through the real auth and request
 //! context middleware reaches what the LLM layer reads off the resolved key:
-//! the dashboard usage report, and the response cache scope
+//! the dashboard usage report, and the response cache scope. Nothing else
+//! authenticates a request: a JWT bearer is refused
 
 use std::time::Duration;
 
@@ -183,4 +184,32 @@ async fn the_response_cache_scope_includes_the_api_key() {
     for key in ["key_a", "key_b", "key_a"] {
         complete(&router, key).await;
     }
+}
+
+/// The gateway authenticates by Synapse API key only. A JWT (or any other
+/// non-key bearer) is refused before any provider call, so there is no
+/// unattributed, unbilled path for a request that skips API key auth
+#[tokio::test]
+async fn a_jwt_bearer_is_refused_before_reaching_a_provider() {
+    let (provider, api) = (MockServer::start().await, mock_api().await);
+    mount_completion(&provider, 0).await;
+
+    let router = router(llm_state(&provider).await, &api);
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c3JfMSJ9.c2lnbmF0dXJl";
+    let request = Request::post("/v1/chat/completions")
+        .header(http::header::AUTHORIZATION, format!("Bearer {jwt}"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": format!("mock/{MODEL}"),
+                "messages": [{ "role": "user", "content": "what should I buy" }],
+                "max_tokens": 100
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
 }
