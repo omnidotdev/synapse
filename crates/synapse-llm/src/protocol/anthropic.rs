@@ -37,6 +37,12 @@ pub struct AnthropicRequest {
     /// Tool choice configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<AnthropicToolChoice>,
+    /// Extended thinking configuration (e.g. `{"type": "adaptive"}`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
+    /// Output configuration (e.g. `{"effort": "high"}`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Anthropic message

@@ -95,6 +95,14 @@ impl From<AnthropicRequest> for CompletionRequest {
                 frequency_penalty: None,
                 presence_penalty: None,
                 seed: None,
+                reasoning_effort: req
+                    .output_config
+                    .as_ref()
+                    .and_then(|config| config.get("effort"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                thinking: req.thinking,
+                output_config: req.output_config,
             },
             tools: req.tools.map(|tools| tools.into_iter().map(Into::into).collect()),
             tool_choice: req.tool_choice.map(|tc| anthropic_tool_choice_to_internal(&tc)),
@@ -270,7 +278,34 @@ impl From<&CompletionRequest> for AnthropicRequest {
             stream: if req.stream { Some(true) } else { None },
             tools,
             tool_choice,
+            thinking: req.params.thinking.clone(),
+            output_config: anthropic_output_config(&req.params),
         }
+    }
+}
+
+/// The `output_config` to send Anthropic: the caller's own, with `effort`
+/// set from the request's reasoning effort when it has one
+fn anthropic_output_config(params: &CompletionParams) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut config = params.output_config.clone().unwrap_or_default();
+    if let Some(effort) = params.reasoning_effort.as_deref() {
+        config.insert(
+            "effort".to_owned(),
+            serde_json::Value::String(anthropic_effort(effort).to_owned()),
+        );
+    }
+    (!config.is_empty()).then_some(config)
+}
+
+/// An effort level as Anthropic names it
+///
+/// `OpenAI`'s levels below `low` (`none`, `minimal`) have no Anthropic
+/// equivalent, so they map to Anthropic's lowest (`low`); every other level
+/// passes through unchanged
+fn anthropic_effort(effort: &str) -> &str {
+    match effort {
+        "none" | "minimal" => "low",
+        other => other,
     }
 }
 
@@ -960,5 +995,65 @@ mod tests {
                 .convert_sse_data(&json!({"type": "some_future_event"}).to_string())
                 .is_empty()
         );
+    }
+
+    /// A client's Anthropic request, through the internal form, to the wire
+    /// request sent to an Anthropic upstream
+    fn anthropic_round_trip(body: &serde_json::Value) -> serde_json::Value {
+        let inbound: AnthropicRequest = serde_json::from_value(body.clone()).unwrap();
+        let internal: CompletionRequest = inbound.into();
+        serde_json::to_value(AnthropicRequest::from(&internal)).unwrap()
+    }
+
+    #[test]
+    fn thinking_and_output_config_pass_through_to_anthropic() {
+        let sent = anthropic_round_trip(&json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 4000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "xhigh", "format": {"type": "json_schema", "schema": {"type": "object"}}},
+        }));
+
+        assert_eq!(sent["thinking"], json!({"type": "adaptive", "display": "summarized"}));
+        assert_eq!(sent["output_config"]["effort"], "xhigh");
+        assert_eq!(sent["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn a_request_without_thinking_or_effort_sends_neither() {
+        let sent = anthropic_round_trip(&json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 4000,
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+
+        assert!(sent.get("thinking").is_none());
+        assert!(sent.get("output_config").is_none());
+    }
+
+    #[test]
+    fn openai_reasoning_effort_reaches_anthropic_as_output_config_effort() {
+        let inbound: crate::protocol::openai::OpenAiRequest = serde_json::from_value(json!({
+            "model": "claude-opus-5-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+        }))
+        .unwrap();
+        let internal: CompletionRequest = inbound.into();
+
+        let sent = serde_json::to_value(AnthropicRequest::from(&internal)).unwrap();
+
+        assert_eq!(sent["output_config"], json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn efforts_below_low_map_to_anthropics_lowest() {
+        for effort in ["none", "minimal"] {
+            assert_eq!(anthropic_effort(effort), "low");
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(anthropic_effort(effort), effort);
+        }
     }
 }

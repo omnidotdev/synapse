@@ -26,6 +26,8 @@ mod served_billing_tests;
 #[cfg(all(test, feature = "billing"))]
 mod spend_tests;
 pub mod state;
+#[cfg(all(test, feature = "billing"))]
+mod thinking_tests;
 pub mod types;
 
 pub use error::LlmError;
