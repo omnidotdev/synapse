@@ -2640,6 +2640,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+ "wiremock",
 ]
 
 [[package]]

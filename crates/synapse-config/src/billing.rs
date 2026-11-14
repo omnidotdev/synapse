@@ -289,7 +289,7 @@ impl BillingConfig {
             "/v1/audio/transcriptions" => Some(&self.stt_feature_key),
             "/v1/audio/speech" => Some(&self.tts_feature_key),
             "/v1/embeddings" => Some(&self.embeddings_feature_key),
-            "/v1/images/generations" => Some(&self.image_gen_feature_key),
+            "/v1/images/generations" | "/v1/images/edits" => Some(&self.image_gen_feature_key),
             _ => None,
         }
     }
@@ -520,6 +520,10 @@ mod tests {
         );
         assert_eq!(
             config.modality_feature_key("/v1/images/generations"),
+            Some("image_gen_enabled")
+        );
+        assert_eq!(
+            config.modality_feature_key("/v1/images/edits"),
             Some("image_gen_enabled")
         );
         assert_eq!(config.modality_feature_key("/v1/chat/completions"), None);

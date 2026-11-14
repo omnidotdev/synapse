@@ -5,10 +5,11 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{Multipart, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ struct MockLlmState {
     completion_count: AtomicU32,
     embedding_count: AtomicU32,
     imagegen_count: AtomicU32,
+    /// Image edit requests received, in order
+    image_edits: Mutex<Vec<CapturedEdit>>,
     /// Number of requests to fail before succeeding (0 = never fail)
     fail_count: AtomicU32,
     /// Custom response content (if set)
@@ -54,6 +57,7 @@ impl MockLlm {
             completion_count: AtomicU32::new(0),
             embedding_count: AtomicU32::new(0),
             imagegen_count: AtomicU32::new(0),
+            image_edits: Mutex::new(Vec::new()),
             fail_count: AtomicU32::new(fail_count),
             response_content,
         });
@@ -63,6 +67,10 @@ impl MockLlm {
             .route("/v1/models", routing::get(handle_models))
             .route("/v1/embeddings", routing::post(handle_embeddings))
             .route("/v1/images/generations", routing::post(handle_imagegen))
+            .route(
+                "/v1/images/edits",
+                routing::post(handle_image_edit).layer(axum::extract::DefaultBodyLimit::disable()),
+            )
             .with_state(Arc::clone(&state));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -102,6 +110,11 @@ impl MockLlm {
     /// Number of image generation requests received
     pub fn imagegen_count(&self) -> u32 {
         self.state.imagegen_count.load(Ordering::Relaxed)
+    }
+
+    /// Image edit requests received, in order
+    pub fn image_edits(&self) -> Vec<CapturedEdit> {
+        self.state.image_edits.lock().unwrap().clone()
     }
 }
 
@@ -293,6 +306,25 @@ struct ImageGenResponse {
 struct ImageData {
     url: String,
     revised_prompt: String,
+}
+
+// -- Image edit types --
+
+/// One multipart part as the mock provider received it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedPart {
+    pub name: String,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    pub data: Vec<u8>,
+}
+
+/// An image edit request as the mock provider received it
+#[derive(Debug, Clone)]
+pub struct CapturedEdit {
+    /// `Authorization` header the gateway sent
+    pub authorization: Option<String>,
+    pub parts: Vec<CapturedPart>,
 }
 
 // -- Handlers --
@@ -598,4 +630,50 @@ async fn handle_imagegen(
     };
 
     Json(response)
+}
+
+/// Usage the mock reports for every image edit: 10,000 image and 50 text
+/// input tokens, 1,056 output tokens (one medium square image)
+pub const MOCK_EDIT_USAGE: (u64, u64, u64) = (10_000, 50, 1056);
+
+async fn handle_image_edit(
+    State(state): State<Arc<MockLlmState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    state.request_count.fetch_add(1, Ordering::Relaxed);
+
+    let mut parts = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_owned();
+        let file_name = field.file_name().map(str::to_owned);
+        let content_type = field.content_type().map(str::to_owned);
+        let data = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+        parts.push(CapturedPart {
+            name,
+            file_name,
+            content_type,
+            data,
+        });
+    }
+
+    state.image_edits.lock().unwrap().push(CapturedEdit {
+        authorization: headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        parts,
+    });
+
+    let (image_tokens, text_tokens, output_tokens) = MOCK_EDIT_USAGE;
+    Json(serde_json::json!({
+        "created": 1_700_000_000,
+        "data": [{ "b64_json": "bW9jay1pbWFnZQ==" }],
+        "usage": {
+            "input_tokens": image_tokens + text_tokens,
+            "input_tokens_details": { "image_tokens": image_tokens, "text_tokens": text_tokens },
+            "output_tokens": output_tokens,
+            "total_tokens": image_tokens + text_tokens + output_tokens
+        }
+    }))
 }

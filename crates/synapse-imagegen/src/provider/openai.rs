@@ -1,13 +1,17 @@
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{
+    Client,
+    multipart::{Form, Part},
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use synapse_core::RequestContext;
 
 use super::ImageGenProvider;
 use crate::{
+    edit::ImageEditRequest,
     error::{ImageGenError, Result},
-    types::{ImageData, ImageRequest, ImageResponse},
+    types::{ImageData, ImageRequest, ImageResponse, ImageUsage},
 };
 
 /// Default `OpenAI` API base URL
@@ -60,7 +64,10 @@ struct OpenAiImageRequest {
 #[derive(Deserialize)]
 struct OpenAiImageResponse {
     created: u64,
+    #[serde(default)]
     data: Vec<OpenAiImageData>,
+    #[serde(default)]
+    usage: Option<ImageUsage>,
 }
 
 #[derive(Deserialize)]
@@ -70,9 +77,102 @@ struct OpenAiImageData {
     revised_prompt: Option<String>,
 }
 
+impl OpenAiImageGenProvider {
+    /// Key for this request: the caller's BYOK key when resolved, else the
+    /// configured key
+    fn api_key<'a>(&'a self, context: &'a RequestContext) -> &'a SecretString {
+        context.api_key.as_ref().unwrap_or(&self.api_key)
+    }
+
+    /// Send a prepared request and map the `OpenAI` response or error
+    async fn send(&self, request: reqwest::RequestBuilder, operation: &str) -> Result<ImageResponse> {
+        let response = request.send().await.map_err(|e| {
+            tracing::error!(provider = %self.name, error = %e, "{operation} request failed");
+            ImageGenError::ConnectionError(format!("Failed to send request to OpenAI {operation}: {e}"))
+        })?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+
+            tracing::error!(
+                provider = %self.name,
+                status = %status,
+                "OpenAI {operation} API error"
+            );
+
+            return Err(match status.as_u16() {
+                401 => ImageGenError::AuthenticationFailed(error_text),
+                400 => ImageGenError::InvalidRequest(error_text),
+                _ => ImageGenError::ProviderApiError {
+                    status: status.as_u16(),
+                    message: error_text,
+                },
+            });
+        }
+
+        let wire_response: OpenAiImageResponse = response.json().await.map_err(|e| {
+            tracing::error!(
+                provider = %self.name,
+                error = %e,
+                "failed to parse OpenAI {operation} response"
+            );
+            ImageGenError::InternalError(None)
+        })?;
+
+        tracing::debug!(provider = %self.name, "{operation} request complete");
+
+        Ok(ImageResponse {
+            created: wire_response.created,
+            data: wire_response
+                .data
+                .into_iter()
+                .map(|d| ImageData {
+                    url: d.url,
+                    b64_json: d.b64_json,
+                    revised_prompt: d.revised_prompt,
+                })
+                .collect(),
+            usage: wire_response.usage,
+        })
+    }
+
+    /// Rebuild the client's form part for part, with the model id stripped
+    /// of its provider prefix
+    fn edit_form(request: &ImageEditRequest) -> Result<Form> {
+        let model = Self::strip_model_prefix(&request.model).to_owned();
+        let mut form = Form::new();
+
+        for part in &request.parts {
+            let mut wire_part = if part.name == "model" {
+                Part::text(model.clone())
+            } else {
+                Part::stream_with_length(reqwest::Body::from(part.data.clone()), part.data.len() as u64)
+            };
+            if let Some(ref file_name) = part.file_name {
+                wire_part = wire_part.file_name(file_name.clone());
+            }
+            if part.name != "model"
+                && let Some(ref content_type) = part.content_type
+            {
+                wire_part = wire_part.mime_str(content_type).map_err(|_| {
+                    ImageGenError::InvalidRequest(format!(
+                        "invalid content type '{content_type}' on field '{}'",
+                        part.name
+                    ))
+                })?;
+            }
+            form = form.part(part.name.clone(), wire_part);
+        }
+
+        Ok(form)
+    }
+}
+
 #[async_trait]
 impl ImageGenProvider for OpenAiImageGenProvider {
-    async fn generate(&self, request: &ImageRequest, _context: &RequestContext) -> Result<ImageResponse> {
+    async fn generate(&self, request: &ImageRequest, context: &RequestContext) -> Result<ImageResponse> {
         let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
         let model = Self::strip_model_prefix(&request.model).to_string();
 
@@ -92,62 +192,39 @@ impl ImageGenProvider for OpenAiImageGenProvider {
             "sending image generation request"
         );
 
-        let response = self
+        let builder = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
-            .json(&wire_request)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(provider = %self.name, error = %e, "image generation request failed");
-                ImageGenError::ConnectionError(format!("Failed to send request to OpenAI image generation: {e}"))
-            })?;
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key(context).expose_secret()),
+            )
+            .json(&wire_request);
 
-        let status = response.status();
+        self.send(builder, "image generation").await
+    }
 
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+    async fn edit(&self, request: &ImageEditRequest, context: &RequestContext) -> Result<ImageResponse> {
+        let url = format!("{}/images/edits", self.base_url.trim_end_matches('/'));
+        let form = Self::edit_form(request)?;
 
-            tracing::error!(
-                provider = %self.name,
-                status = %status,
-                "OpenAI image generation API error"
-            );
+        tracing::debug!(
+            provider = %self.name,
+            model = %request.model,
+            images = request.image_count,
+            "sending image edit request"
+        );
 
-            return Err(match status.as_u16() {
-                401 => ImageGenError::AuthenticationFailed(error_text),
-                400 => ImageGenError::InvalidRequest(error_text),
-                _ => ImageGenError::ProviderApiError {
-                    status: status.as_u16(),
-                    message: error_text,
-                },
-            });
-        }
+        let builder = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key(context).expose_secret()),
+            )
+            .multipart(form);
 
-        let wire_response: OpenAiImageResponse = response.json().await.map_err(|e| {
-            tracing::error!(
-                provider = %self.name,
-                error = %e,
-                "failed to parse OpenAI image generation response"
-            );
-            ImageGenError::InternalError(None)
-        })?;
-
-        tracing::debug!(provider = %self.name, "image generation request complete");
-
-        Ok(ImageResponse {
-            created: wire_response.created,
-            data: wire_response
-                .data
-                .into_iter()
-                .map(|d| ImageData {
-                    url: d.url,
-                    b64_json: d.b64_json,
-                    revised_prompt: d.revised_prompt,
-                })
-                .collect(),
-        })
+        self.send(builder, "image edit").await
     }
 
     fn name(&self) -> &str {

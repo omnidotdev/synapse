@@ -15,6 +15,10 @@ pub enum ImageGenError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Request body exceeds the endpoint's size limit
+    #[error("Request too large: {0}")]
+    PayloadTooLarge(String),
+
     /// Authentication failed (missing or invalid API key)
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -39,6 +43,15 @@ pub enum ImageGenError {
     #[error("billing service unavailable")]
     BillingUnavailable,
 
+    /// The credit wallet cannot cover the request's estimated cost
+    #[error("insufficient credits: {0}")]
+    InsufficientCredits(String),
+
+    /// A managed request named a model with no billable price, so serving it
+    /// on Omni's key would bill nothing
+    #[error("model '{model}' is not available with managed billing")]
+    ModelNotPriced { model: String },
+
     /// The product includes AI in its tier and this period's fair-use
     /// allowance cannot cover the request. Never charged to the credit wallet
     #[error("the included AI allowance for this period is used up")]
@@ -55,7 +68,8 @@ impl ImageGenError {
     /// Get the appropriate HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } => StatusCode::BAD_REQUEST,
+            Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             Self::ProviderNotFound(_) => StatusCode::NOT_FOUND,
             Self::ConnectionError(_) => StatusCode::BAD_GATEWAY,
@@ -67,7 +81,7 @@ impl ImageGenError {
                 _ => StatusCode::BAD_GATEWAY,
             },
             Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
+            Self::InsufficientCredits(_) | Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
             Self::ConfigError(_) | Self::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -75,7 +89,8 @@ impl ImageGenError {
     /// Get the error type string for the response
     pub fn error_type(&self) -> &str {
         match self {
-            Self::InvalidRequest(_) => "invalid_request_error",
+            Self::InvalidRequest(_) | Self::ModelNotPriced { .. } | Self::PayloadTooLarge(_) => "invalid_request_error",
+            Self::InsufficientCredits(_) => "insufficient_credits_error",
             Self::AuthenticationFailed(_) => "authentication_error",
             Self::ProviderNotFound(_) => "not_found_error",
             Self::ConnectionError(_) | Self::ProviderApiError { .. } => "api_error",
