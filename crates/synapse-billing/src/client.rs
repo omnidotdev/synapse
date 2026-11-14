@@ -423,6 +423,14 @@ impl AetherClient {
         entity_id: &str,
         request: &CreditDeductRequest,
     ) -> Result<CreditDeductResponse, BillingError> {
+        // The ledger stores 4 decimal places, so round the charge up to it:
+        // left to Aether, a sub-$0.00005 request would round to a free $0
+        let rounded = CreditDeductRequest {
+            amount: round_up_to_ledger_precision(request.amount),
+            ..request.clone()
+        };
+        let request = &rounded;
+
         let url = self
             .base_url
             .join(&format!("credits/{app_id}/{entity_type}/{entity_id}/deduct"))
@@ -946,5 +954,52 @@ mod tests {
         assert_eq!(resp.entitlements.len(), 2);
         assert_eq!(resp.entitlements[0].feature_key, "api_access");
         assert_eq!(resp.entitlement_version, Some(5));
+    }
+}
+
+/// Ledger resolution of Aether's credit balance (`numeric(12,4)`, USD)
+const LEDGER_UNITS_PER_USD: f64 = 10_000.0;
+
+/// Round a USD charge up to the ledger's precision so no request is free
+///
+/// A tiny epsilon absorbs float noise (0.1 is stored as 0.1000000000000000055)
+/// so an exact amount is never pushed up a whole unit
+#[must_use]
+pub fn round_up_to_ledger_precision(amount_usd: f64) -> f64 {
+    if amount_usd <= 0.0 {
+        return amount_usd;
+    }
+    amount_usd.mul_add(LEDGER_UNITS_PER_USD, -1e-6).ceil() / LEDGER_UNITS_PER_USD
+}
+
+#[cfg(test)]
+mod ledger_precision_tests {
+    use super::round_up_to_ledger_precision;
+
+    #[test]
+    fn sub_unit_charges_round_up_to_one_unit() {
+        assert!((round_up_to_ledger_precision(0.000_009) - 0.0001).abs() < 1e-12);
+        assert!((round_up_to_ledger_precision(0.000_049) - 0.0001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exact_amounts_are_unchanged() {
+        for amount in [0.1, 0.0003, 1.0, 0.9877, 12.3456] {
+            assert!(
+                (round_up_to_ledger_precision(amount) - amount).abs() < 1e-12,
+                "{amount}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_units_round_up() {
+        assert!((round_up_to_ledger_precision(0.012_31) - 0.0124).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zero_and_negative_pass_through() {
+        assert!(round_up_to_ledger_precision(0.0).abs() < f64::EPSILON);
+        assert!((round_up_to_ledger_precision(-1.0) + 1.0).abs() < f64::EPSILON);
     }
 }
