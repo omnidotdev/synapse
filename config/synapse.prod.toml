@@ -99,6 +99,8 @@ tool_calling = true
 vision = true
 long_context = true
 
+# Deprecated upstream (retires 2026-11-30): priced only so direct keys keep
+# working until then; never a failover, routing, or product-policy target
 [[llm.routing.models]]
 provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
@@ -252,13 +254,22 @@ long_context = true
 enabled = true
 max_attempts = 2
 
+# Only current, priced models. With max_attempts = 2 a failed model falls back
+# to the first other member of the first group listing it, so each group is
+# ordered for that first fallback to cross vendors (an outage at one provider
+# never fails over to the same provider). Explicit `provider/model` requests
+# and product keys outside their policy never fail over
 [[llm.failover.equivalence_groups]]
 name = "frontier"
-models = ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-5-20250929", "openai/gpt-4o", "nvidia/moonshotai/kimi-k2.5"]
+models = ["anthropic/claude-sonnet-5-5", "openai/gpt-4o", "nvidia/moonshotai/kimi-k2.5"]
+
+[[llm.failover.equivalence_groups]]
+name = "premium"
+models = ["anthropic/claude-opus-5-5", "openai/gpt-4o"]
 
 [[llm.failover.equivalence_groups]]
 name = "fast"
-models = ["openai/gpt-4o-mini", "anthropic/claude-haiku-4-5-20251001"]
+models = ["anthropic/claude-haiku-5-5", "openai/gpt-4o-mini"]
 
 [llm.failover.circuit_breaker]
 error_threshold = 5

@@ -135,3 +135,94 @@ fn prod_config_declares_product_model_policies() {
         );
     }
 }
+
+/// Model ids Anthropic has retired (requests fail upstream); none may appear
+/// anywhere in the config
+const RETIRED_MODELS: &[&str] = &[
+    "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-opus-4-20250514",
+    "anthropic/claude-opus-4-1-20250805",
+    "anthropic/claude-3-7-sonnet-20250219",
+    "anthropic/claude-3-5-sonnet-20241022",
+    "anthropic/claude-3-5-haiku-20241022",
+    "anthropic/claude-3-haiku-20240307",
+];
+
+/// Deprecated upstream and retiring soon: may stay priced for direct keys
+/// until retirement, but never be a failover, routing, or product target
+const DEPRECATED_MODELS: &[&str] = &["anthropic/claude-sonnet-4-5-20250929"];
+
+/// Failover and routing only ever land on current, priced models, and every
+/// failover group's first fallback crosses vendors
+#[test]
+fn prod_config_failover_and_routing_use_current_priced_models() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/synapse.prod.toml");
+    let raw = std::fs::read_to_string(path).expect("read prod config");
+    let placeholders = regex::Regex::new(r"\{\{.*?\}\}").expect("placeholder pattern");
+    let expanded = placeholders.replace_all(&raw, "http://placeholder.invalid");
+    let config: synapse_config::Config = toml::from_str(&expanded).expect("parse prod config");
+
+    let priced: Vec<String> = config
+        .llm
+        .routing
+        .models
+        .iter()
+        .map(|m| format!("{}/{}", m.provider, m.model))
+        .collect();
+
+    // No retired id is priced (a priced retired model 404s upstream after
+    // passing the spend check)
+    for id in &priced {
+        assert!(!RETIRED_MODELS.contains(&id.as_str()), "{id} is retired but priced");
+    }
+
+    let current = |id: &str, role: &str| {
+        assert!(priced.iter().any(|p| p == id), "{role} {id} is not priced");
+        assert!(!RETIRED_MODELS.contains(&id), "{role} {id} is retired");
+        assert!(!DEPRECATED_MODELS.contains(&id), "{role} {id} is deprecated");
+    };
+
+    let threshold = &config.llm.routing.threshold;
+    for id in [&threshold.low_complexity_model, &threshold.high_complexity_model]
+        .into_iter()
+        .flatten()
+    {
+        current(id, "threshold model");
+    }
+
+    let groups = &config.llm.failover.equivalence_groups;
+    assert!(!groups.is_empty(), "failover groups configured");
+    for group in groups {
+        for id in &group.models {
+            current(id, &format!("failover group {}", group.name));
+        }
+        let providers: std::collections::HashSet<_> = group
+            .models
+            .iter()
+            .filter_map(|m| m.split_once('/').map(|(p, _)| p))
+            .collect();
+        assert!(providers.len() >= 2, "failover group {} spans vendors", group.name);
+    }
+
+    // The gateway tries the first other member of the first group listing a
+    // model; that fallback must be another vendor, or a provider outage fails
+    // over into the same outage
+    for id in groups.iter().flat_map(|g| g.models.iter()) {
+        let group = groups.iter().find(|g| g.models.contains(id)).expect("group");
+        let fallback = group.models.iter().find(|m| *m != id).expect("fallback");
+        let vendor = |m: &str| m.split_once('/').map(|(p, _)| p.to_owned());
+        assert_ne!(
+            vendor(id),
+            vendor(fallback),
+            "{id} falls back to {fallback}, the same vendor"
+        );
+    }
+
+    if let Some(billing) = &config.billing {
+        for (product, policy) in &billing.products {
+            for id in &policy.models {
+                current(id, &format!("{product} policy model"));
+            }
+        }
+    }
+}
