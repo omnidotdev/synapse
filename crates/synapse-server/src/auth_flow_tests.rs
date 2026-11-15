@@ -214,3 +214,109 @@ async fn a_jwt_bearer_is_refused_before_reaching_a_provider() {
 
     assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
 }
+
+/// An Anthropic-format request authenticated the way the given header sets
+fn anthropic_message(uri: &str, auth: (&str, &str)) -> Request<Body> {
+    Request::post(uri)
+        .header(auth.0, auth.1)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(Body::from(
+            serde_json::json!({
+                "model": format!("mock/{MODEL}"),
+                "messages": [{ "role": "user", "content": "what should I buy" }],
+                "max_tokens": 100
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+/// The default Anthropic SDK sends its key in `x-api-key`, so the
+/// Anthropic-compatible endpoint accepts a Synapse key there, resolved and
+/// billed exactly like a Bearer key
+#[tokio::test]
+async fn x_api_key_authenticates_the_messages_endpoint() {
+    let (provider, api) = (MockServer::start().await, mock_api().await);
+    mount_completion(&provider, 1).await;
+
+    let router = router(llm_state(&provider).await, &api);
+    let response = router
+        .oneshot(anthropic_message("/v1/messages", ("x-api-key", "synapse_key_a")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        events = reported_events(&api).await;
+        if !events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(events.len(), 1, "the x-api-key request is reported once");
+    assert_eq!(events[0]["apiKeyId"], "key_a");
+}
+
+/// `x-api-key` gets the same validation as a Bearer key: a value without the
+/// Synapse prefix, or a key the resolver does not know, is refused before
+/// any provider call
+#[tokio::test]
+async fn x_api_key_is_validated_like_a_bearer_key() {
+    let (provider, api) = (MockServer::start().await, mock_api().await);
+    mount_completion(&provider, 0).await;
+
+    let router = router(llm_state(&provider).await, &api);
+    for key in ["sk-ant-provider-key", "synapse_unknown"] {
+        let response = router
+            .clone()
+            .oneshot(anthropic_message("/v1/messages", ("x-api-key", key)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED, "{key}");
+    }
+}
+
+/// Only the Anthropic-compatible endpoint reads `x-api-key`; every other route
+/// still requires `Authorization: Bearer`
+#[tokio::test]
+async fn x_api_key_is_not_accepted_on_other_endpoints() {
+    let (provider, api) = (MockServer::start().await, mock_api().await);
+    mount_completion(&provider, 0).await;
+
+    let router = router(llm_state(&provider).await, &api);
+    let request = Request::post("/v1/chat/completions")
+        .header("x-api-key", "synapse_key_a")
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": format!("mock/{MODEL}"),
+                "messages": [{ "role": "user", "content": "what should I buy" }],
+                "max_tokens": 100
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+/// A Bearer key still wins on the messages endpoint, so an `x-api-key` sent
+/// alongside it (a provider key, say) never replaces the authenticated key
+#[tokio::test]
+async fn bearer_takes_precedence_over_x_api_key() {
+    let (provider, api) = (MockServer::start().await, mock_api().await);
+    mount_completion(&provider, 1).await;
+
+    let router = router(llm_state(&provider).await, &api);
+    let mut request = anthropic_message("/v1/messages", ("authorization", "Bearer synapse_key_b"));
+    request
+        .headers_mut()
+        .insert("x-api-key", http::HeaderValue::from_static("not-a-synapse-key"));
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}

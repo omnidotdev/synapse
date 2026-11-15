@@ -26,6 +26,11 @@ components:
       type: http
       scheme: bearer
       description: Synapse API key (prefixed with `synapse_`)
+    anthropicApiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Synapse API key (prefixed with `synapse_`) in the header Anthropic clients send. Accepted only on `/v1/messages`; a Bearer key takes precedence when both are sent
 
   schemas:
     # -- LLM --
@@ -691,6 +696,9 @@ paths:
       operationId: createMessage
       summary: Create a message (Anthropic-compatible)
       tags: [LLM]
+      security:
+        - apiKey: []
+        - anthropicApiKey: []
       requestBody:
         required: true
         content:
