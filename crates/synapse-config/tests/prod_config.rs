@@ -90,19 +90,28 @@ fn prod_config_declares_product_model_policies() {
     assert_eq!(myfi.default_model, "anthropic/claude-haiku-5-5");
     assert_eq!(myfi.models, ["anthropic/claude-haiku-5-5"]);
 
-    assert!(billing.products.contains_key("creator"), "creator has a model policy");
+    // Creator reads its picker from the gateway; Haiku 5.5 default, with
+    // GPT-4o mini kept as its OpenAI option
+    let creator = &billing.products["creator"];
+    assert_eq!(creator.default_model, "anthropic/claude-haiku-5-5");
+    assert_eq!(
+        creator.models,
+        [
+            "anthropic/claude-haiku-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "openai/gpt-4o-mini"
+        ]
+    );
 
-    // No product other than creator (which still sends them) is offered a
-    // retired-generation model
+    // No product is offered a retired-generation or superseded model
     let retired = [
         "anthropic/claude-sonnet-4-5-20250929",
+        "anthropic/claude-sonnet-4-6",
         "anthropic/claude-haiku-4-5-20251001",
         "anthropic/claude-opus-4-6",
+        "openai/gpt-4o",
     ];
     for (product, policy) in &billing.products {
-        if product == "creator" {
-            continue;
-        }
         for model in &policy.models {
             assert!(!retired.contains(&model.as_str()), "{product} still offers {model}");
         }
