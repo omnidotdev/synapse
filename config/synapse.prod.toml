@@ -233,19 +233,6 @@ context_window = 128000
 [llm.routing.models.capabilities]
 tool_calling = true
 
-[[llm.routing.models]]
-provider = "nvidia"
-model = "moonshotai/kimi-k2.5"
-display_name = "Kimi K2.5"
-input_per_mtok = 0.60
-output_per_mtok = 2.50
-quality = 0.89
-context_window = 262000
-[llm.routing.models.capabilities]
-tool_calling = true
-vision = true
-long_context = true
-
 # ------------------------------------
 # Failover
 # ------------------------------------
@@ -261,7 +248,7 @@ max_attempts = 2
 # and product keys outside their policy never fail over
 [[llm.failover.equivalence_groups]]
 name = "frontier"
-models = ["anthropic/claude-sonnet-5-5", "openai/gpt-4o", "nvidia/moonshotai/kimi-k2.5"]
+models = ["anthropic/claude-sonnet-5-5", "openai/gpt-4o"]
 
 [[llm.failover.equivalence_groups]]
 name = "premium"
