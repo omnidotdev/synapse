@@ -16,11 +16,44 @@ use synapse_core::{BillingIdentity, BillingMode};
 #[derive(Clone, Debug)]
 pub struct VaultProviderKeys(pub HashMap<String, SecretString>);
 
+/// Paths that also accept the key in `x-api-key`: the Anthropic-compatible
+/// endpoint, where the default Anthropic SDK sends its key in that header
+const X_API_KEY_PATHS: &[&str] = &["/v1/messages"];
+
+/// Header Anthropic clients send their key in
+const X_API_KEY: &str = "x-api-key";
+
+/// The API key a request authenticates with, and whether it came from
+/// `x-api-key`
+///
+/// A Bearer token always wins; `x-api-key` is read only on
+/// [`X_API_KEY_PATHS`] and only when no Bearer token is present
+fn request_api_key(headers: &http::HeaderMap, path: &str) -> Option<(String, bool)> {
+    let bearer = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(token) = bearer {
+        return Some((token.to_owned(), false));
+    }
+
+    if !X_API_KEY_PATHS.contains(&path) {
+        return None;
+    }
+
+    headers
+        .get(X_API_KEY)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| (v.trim().to_owned(), true))
+}
+
 /// Authenticate requests via API key
 ///
-/// Extracts Bearer token from Authorization header, which must use the
-/// `synapse_` prefix. Rejects requests without a valid token unless the
-/// path is in the public paths list.
+/// Extracts the Bearer token from the Authorization header (or, on the
+/// Anthropic-compatible `/v1/messages`, the `x-api-key` header), which must
+/// use the `synapse_` prefix. Both are resolved and billed the same way.
+/// Rejects requests without a valid key unless the path is in the public
+/// paths list.
 ///
 /// When a `VaultClient` is provided and the key mode is BYOK, provider
 /// keys are resolved from Gatekeeper's vault as an overlay
@@ -44,13 +77,7 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    let token = request
-        .headers()
-        .get(http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    let Some(token) = token else {
+    let Some((token, from_x_api_key)) = request_api_key(request.headers(), &path) else {
         return (StatusCode::UNAUTHORIZED, "missing Authorization header").into_response();
     };
 
@@ -58,11 +85,17 @@ pub async fn auth_middleware(
         return (StatusCode::UNAUTHORIZED, "invalid API key format").into_response();
     }
 
-    match resolver.resolve(token).await {
+    match resolver.resolve(&token).await {
         Ok(result) => {
             let billing_identity = resolve_billing_identity(&result, &default_app_id);
 
             let mut request = request;
+
+            // The Synapse key never travels further than auth, so a header
+            // forwarding rule can never hand it to a provider
+            if from_x_api_key {
+                request.headers_mut().remove(X_API_KEY);
+            }
 
             // Resolve BYOK keys from Gatekeeper vault when configured
             if result.mode == KeyMode::Byok
@@ -162,6 +195,39 @@ mod tests {
     /// pin the camelCase contract (`appId`, `billingEntity`)
     fn key(json: serde_json::Value) -> ResolvedKey {
         serde_json::from_value(json).expect("valid resolved key")
+    }
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, http::HeaderValue::from_static(value));
+        }
+        map
+    }
+
+    #[test]
+    fn bearer_is_read_on_every_path() {
+        let h = headers(&[("authorization", "Bearer synapse_a")]);
+        assert_eq!(
+            request_api_key(&h, "/v1/chat/completions"),
+            Some(("synapse_a".into(), false))
+        );
+        assert_eq!(request_api_key(&h, "/v1/messages"), Some(("synapse_a".into(), false)));
+    }
+
+    #[test]
+    fn x_api_key_is_read_only_on_the_messages_endpoint() {
+        let h = headers(&[("x-api-key", "synapse_a")]);
+        assert_eq!(request_api_key(&h, "/v1/messages"), Some(("synapse_a".into(), true)));
+        assert_eq!(request_api_key(&h, "/v1/chat/completions"), None);
+        assert_eq!(request_api_key(&h, "/v1/models"), None);
+        assert_eq!(request_api_key(&h, "/v1/messages/batches"), None);
+    }
+
+    #[test]
+    fn bearer_wins_over_x_api_key() {
+        let h = headers(&[("authorization", "Bearer synapse_a"), ("x-api-key", "synapse_b")]);
+        assert_eq!(request_api_key(&h, "/v1/messages"), Some(("synapse_a".into(), false)));
     }
 
     #[test]
