@@ -102,15 +102,26 @@ async fn fetch_openai_models(client: &Client, config: &LlmProviderConfig) -> Res
 /// and may not return all available models, so we maintain a static
 /// fallback list of commonly available models
 fn static_anthropic_models() -> Vec<String> {
-    // Current first-party lineup, verified served upstream 2026-09-21. The older
-    // claude-4 dated ids and the claude-3 family now 404 upstream, so they are
-    // dropped; explicit `anthropic/<model>` requests bypass this list anyway
-    // (it only backs non-explicit resolution when the models endpoint is down).
-    vec![
-        "claude-opus-4-6".to_owned(),
-        "claude-sonnet-4-5-20250929".to_owned(),
-        "claude-haiku-4-5-20251001".to_owned(),
+    // First-party models Anthropic serves as of 2026-11-14 (retired ids such as
+    // claude-sonnet-4-20250514 and the claude-3 family 404 upstream and are
+    // left out). Bare `claude-*` ids also resolve by vendor prefix, so this
+    // list never has to be complete
+    [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5-20251001",
     ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 /// Fetch models from the Google Generative Language API
