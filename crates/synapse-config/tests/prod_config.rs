@@ -146,6 +146,8 @@ const RETIRED_MODELS: &[&str] = &[
     "anthropic/claude-3-5-sonnet-20241022",
     "anthropic/claude-3-5-haiku-20241022",
     "anthropic/claude-3-haiku-20240307",
+    // NVIDIA's catalog dropped it for moonshotai/kimi-k2.6 (404 upstream)
+    "nvidia/moonshotai/kimi-k2.5",
 ];
 
 /// Deprecated upstream and retiring soon: may stay priced for direct keys
