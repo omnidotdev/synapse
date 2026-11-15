@@ -393,14 +393,11 @@ default_model = "anthropic/claude-sonnet-5-5"
 models = ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
 default_model = "anthropic/claude-haiku-5-5"
 
+# creator-api reads its picker from GET /v1/models; Haiku 5.5 by default,
+# Sonnet 5.5 for quality, GPT-4o mini as the OpenAI option
 [billing.products.creator]
-models = [
-  "anthropic/claude-sonnet-4-6",
-  "anthropic/claude-haiku-4-5-20251001",
-  "openai/gpt-4o",
-  "openai/gpt-4o-mini",
-]
-default_model = "openai/gpt-4o-mini"
+models = ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-4o-mini"]
+default_model = "anthropic/claude-haiku-5-5"
 
 # myfi sends `auto` for bulk and interactive categorization. Picking two
 # accounts from a chart is well within Haiku 5.5, and myfi's AI is an included
