@@ -16,7 +16,7 @@ fn prod_config_parses_and_validates() {
     config.validate().expect("prod config passes boot validation");
 }
 
-/// Posture C products (AI included in the SaaS tier) must be declared with
+/// Posture C products (AI included in the `SaaS` tier) must be declared with
 /// their allowance meter and the fleet retail margin, or their AI would draw
 /// on the pooled wallet instead of the included allowance
 #[test]
@@ -39,6 +39,24 @@ fn prod_config_declares_posture_c_products() {
             "{product} must carry the fleet retail margin"
         );
     }
+}
+
+/// A wallet-billed managed request must never be served unbilled during an
+/// Aether outage, whatever the general fail mode is
+#[test]
+fn prod_config_fails_wallet_spend_checks_closed() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/synapse.prod.toml");
+    let raw = std::fs::read_to_string(path).expect("read prod config");
+    let placeholders = regex::Regex::new(r"\{\{.*?\}\}").expect("placeholder pattern");
+    let expanded = placeholders.replace_all(&raw, "http://placeholder.invalid");
+    let config: synapse_config::Config = toml::from_str(&expanded).expect("parse prod config");
+    let billing = config.billing.expect("billing configured");
+
+    assert_eq!(billing.wallet_fail_mode, synapse_config::FailMode::Closed);
+    assert_eq!(
+        billing.spend_fail_modes().for_spend(true),
+        &synapse_config::FailMode::Closed
+    );
 }
 
 /// Every product with a product-scoped chat key has a model policy, so its

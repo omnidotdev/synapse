@@ -334,7 +334,15 @@ app_id = "synapse"
 mode = "hybrid"
 # Degraded: during an Aether outage keep serving but under an emergency token
 # ceiling, so availability holds without the outage becoming unmetered spend.
+# Governs the entitlement gate for every request and the spend check of
+# included allowance products (myfi, backfeed). BYOK has no spend check
 fail_mode = "degraded"
+# Managed requests billed to the pooled credit wallet (every product-scoped
+# key outside included_allowance_products, e.g. facet, keystone, beacon,
+# creator, plus Synapse's own managed keys) fail closed: with Aether
+# unreachable their balance cannot be checked, so they are refused with 503
+# billing_unavailable_error instead of being served unbilled
+wallet_fail_mode = "closed"
 
 # Modality feature keys (defaults match Aether seed values)
 # stt_feature_key = "stt_enabled"

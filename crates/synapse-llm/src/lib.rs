@@ -15,6 +15,8 @@ pub mod convert;
 mod cost_report_tests;
 pub mod discovery;
 pub mod error;
+#[cfg(feature = "billing")]
+mod estimate;
 #[cfg(feature = "http")]
 pub mod handler;
 pub mod health;

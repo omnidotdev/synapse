@@ -113,6 +113,13 @@ pub struct CreditDeductRequest {
     /// Reference identifier
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_id: Option<String>,
+    /// Record the debit even if it takes the balance negative
+    ///
+    /// Set for a post-usage settlement, where the spend already happened
+    /// upstream and refusing the debit would only lose the charge. Left off
+    /// (and omitted from the body) for a debit that may still be refused
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub settle: bool,
 }
 
 /// Response from deducting credits
@@ -142,6 +149,7 @@ mod wire_tests {
             idempotency_key: Some("k".to_owned()),
             reference_type: Some("completion".to_owned()),
             reference_id: Some("r".to_owned()),
+            settle: false,
         })
         .unwrap();
 
@@ -149,6 +157,24 @@ mod wire_tests {
         assert_eq!(body["referenceType"], "completion");
         assert_eq!(body["referenceId"], "r");
         assert!(body.get("idempotency_key").is_none());
+        // A refusable debit leaves the field off so any Aether accepts it
+        assert!(body.get("settle").is_none());
+    }
+
+    #[test]
+    fn settlement_deduct_request_sends_settle_true() {
+        let body = serde_json::to_value(CreditDeductRequest {
+            amount: 1.5,
+            description: None,
+            idempotency_key: Some("k".to_owned()),
+            reference_type: None,
+            reference_id: None,
+            settle: true,
+        })
+        .unwrap();
+
+        assert_eq!(body["settle"], true);
+        assert_eq!(body["idempotencyKey"], "k");
     }
 
     #[test]

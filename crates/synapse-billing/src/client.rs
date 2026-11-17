@@ -48,6 +48,49 @@ impl AetherClient {
         })
     }
 
+    /// Whether managed spend billed to `app_id` is charged to the pooled
+    /// credit wallet (rather than an included allowance meter)
+    #[must_use]
+    pub fn bills_wallet(&self, app_id: &str) -> bool {
+        self.spend_policy.target(app_id) == SpendTarget::Wallet
+    }
+
+    /// Settle a response with the circuit breaker and decode its body
+    ///
+    /// Only an unreachable or failing Aether (a transport error, a 5xx, a 408
+    /// or a 429) counts toward opening the circuit. Any other 4xx means Aether
+    /// answered and refused that one request, so it must not open the circuit
+    /// for every caller: wallet-billed spend checks fail closed while the
+    /// circuit is open
+    async fn read_response<T: serde::de::DeserializeOwned>(
+        &self,
+        result: Result<reqwest::Response, reqwest::Error>,
+    ) -> Result<T, BillingError> {
+        match result {
+            Ok(response) if response.status().is_success() => {
+                self.circuit.record_success();
+                Ok(response.json().await?)
+            }
+            Ok(response) => {
+                let status = response.status();
+                if counts_as_outage(status) {
+                    self.circuit.record_failure();
+                } else {
+                    self.circuit.record_success();
+                }
+                let message = response.text().await.unwrap_or_default();
+                Err(BillingError::Api {
+                    status: status.as_u16(),
+                    message,
+                })
+            }
+            Err(e) => {
+                self.circuit.record_failure();
+                Err(BillingError::Request(e))
+            }
+        }
+    }
+
     /// Route each product's spend per `policy` in [`Self::check_spend`] and
     /// [`Self::settle_spend`] (every product bills the credit wallet by default)
     #[must_use]
@@ -117,14 +160,21 @@ impl AetherClient {
     ) -> Result<(), BillingError> {
         match self.spend_policy.target(app_id) {
             SpendTarget::Wallet => {
+                // The request was already served, so the debit is a
+                // settlement: Aether records it even when it takes the balance
+                // negative instead of refusing it and losing the charge
                 let request = CreditDeductRequest {
                     amount: charge.amount_usd,
                     description: Some(charge.description.clone()),
                     idempotency_key: Some(charge.idempotency_key.clone()),
                     reference_type: Some(charge.reference_type.clone()),
                     reference_id: None,
+                    settle: true,
                 };
-                self.deduct_credits(app_id, entity_type, entity_id, &request).await?;
+                if let Err(e) = self.deduct_credits(app_id, entity_type, entity_id, &request).await {
+                    log_unsettled_debit(app_id, entity_type, entity_id, charge, &e);
+                    return Err(e);
+                }
             }
             SpendTarget::Allowance { meter_key } => {
                 let metadata = HashMap::from([
@@ -191,22 +241,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Check whether additional usage is within limits
@@ -242,22 +277,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Check whether an entity has access to a feature
@@ -293,22 +313,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Retrieve all entitlements for an entity
@@ -341,22 +346,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Check whether an entity has sufficient credits
@@ -391,22 +381,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Deduct credits from an entity's balance
@@ -449,22 +424,7 @@ impl AetherClient {
             .send()
             .await;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                self.circuit.record_success();
-                Ok(response.json().await?)
-            }
-            Ok(response) => {
-                self.circuit.record_failure();
-                let status = response.status().as_u16();
-                let message = response.text().await.unwrap_or_default();
-                Err(BillingError::Api { status, message })
-            }
-            Err(e) => {
-                self.circuit.record_failure();
-                Err(BillingError::Request(e))
-            }
-        }
+        self.read_response(result).await
     }
 
     /// Check connectivity to Aether
@@ -493,6 +453,49 @@ impl AetherClient {
             Err(BillingError::Api { status, message })
         }
     }
+}
+
+/// Whether a non-success Aether status means Aether is unavailable, as
+/// opposed to refusing one well-formed request
+fn counts_as_outage(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Record a served request whose wallet debit did not land
+///
+/// The upstream spend already happened, so a lost debit is unbilled usage
+/// that must be reconciled by hand. Logged once at error level with every
+/// field needed to replay the debit (the idempotency key makes a replay
+/// safe); never retried here, so a debit Aether refuses cannot loop
+fn log_unsettled_debit(app_id: &str, entity_type: &str, entity_id: &str, charge: &SpendCharge, error: &BillingError) {
+    let status = match error {
+        BillingError::Api { status, .. } => Some(*status),
+        _ => None,
+    };
+    let reason = match status {
+        // An Aether that predates settlement debits may reject the `settle`
+        // field outright, or ignore it and refuse a debit the balance cannot
+        // cover
+        Some(400 | 422) => "Aether rejected the settlement debit request (settle field unsupported?)",
+        Some(402) => "Aether refused the settlement debit for insufficient balance (settle not honored)",
+        Some(_) => "Aether returned an error for the settlement debit",
+        None => "Aether unreachable for the settlement debit",
+    };
+    tracing::error!(
+        error = %error,
+        status,
+        app_id,
+        entity_type,
+        entity_id,
+        amount_usd = charge.amount_usd,
+        idempotency_key = %charge.idempotency_key,
+        description = %charge.description,
+        reference_type = %charge.reference_type,
+        reconcile = true,
+        "unsettled wallet debit: {reason}"
+    );
 }
 
 impl std::fmt::Debug for AetherClient {
@@ -869,7 +872,8 @@ mod tests {
                 "amount": 0.015,
                 "idempotencyKey": "req-1",
                 "referenceType": "completion",
-                "description": "anthropic/claude-haiku-5"
+                "description": "anthropic/claude-haiku-5",
+                "settle": true
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "success": true, "balance": 0.985
@@ -884,6 +888,88 @@ mod tests {
             .settle_spend("facet", "user", "usr_1", &charge(0.015))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_settlement_debit_is_attempted_once_and_surfaced() {
+        // An Aether that predates settlement debits may reject the unknown
+        // field: the charge is logged for reconciliation, never retried
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/credits/facet/user/usr_1/deduct"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("unknown property settle"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        let result = client.settle_spend("facet", "user", "usr_1", &charge(0.015)).await;
+
+        assert!(matches!(result, Err(BillingError::Api { status: 422, .. })));
+    }
+
+    #[test]
+    fn bills_wallet_follows_the_spend_policy() {
+        let client = posture_client("http://127.0.0.1:1/");
+
+        assert!(client.bills_wallet("facet"));
+        assert!(client.bills_wallet("synapse"));
+        assert!(!client.bills_wallet("myfi"));
+    }
+
+    #[tokio::test]
+    async fn client_errors_never_open_the_circuit() {
+        // A refused request (e.g. a rejected debit) proves Aether is up, so a
+        // run of them must not open the circuit and fail every wallet-billed
+        // spend check closed
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/credits/facet/user/usr_1/deduct"))
+            .respond_with(ResponseTemplate::new(422))
+            .expect(5)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": true, "balance": 1.0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+        for _ in 0..5 {
+            let _ = client.settle_spend("facet", "user", "usr_1", &charge(0.015)).await;
+        }
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await;
+
+        assert!(matches!(check, Ok(SpendCheck::Allowed)));
+    }
+
+    #[tokio::test]
+    async fn server_errors_still_open_the_circuit() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/check"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+        for _ in 0..3 {
+            let _ = client.check_spend("facet", "user", "usr_1", 0.5).await;
+        }
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await;
+
+        assert!(matches!(check, Err(BillingError::CircuitOpen)));
     }
 
     #[tokio::test]

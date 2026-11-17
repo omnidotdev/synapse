@@ -66,8 +66,22 @@ pub struct BillingConfig {
     #[serde(default)]
     pub products: IndexMap<String, ProductModelPolicyConfig>,
     /// Behavior when Aether is unreachable
+    ///
+    /// Governs the entitlement middleware for every request, and the
+    /// pre-request spend check for every managed request that is not billed
+    /// to the pooled credit wallet (included allowance products). BYOK
+    /// requests have no spend check
     #[serde(default)]
     pub fail_mode: FailMode,
+    /// Behavior when Aether is unreachable during the pre-request spend check
+    /// of a managed request billed to the pooled credit wallet (every managed
+    /// key whose product is not in `included_allowance_products`)
+    ///
+    /// Defaults to `closed`: the wallet is prepaid money and its balance is
+    /// the only bound on what such a request may spend, so without a balance
+    /// check the request is refused with 503 rather than served unbilled
+    #[serde(default = "default_wallet_fail_mode")]
+    pub wallet_fail_mode: FailMode,
     /// Feature key for API access entitlement
     #[serde(default = "default_api_access_feature_key")]
     pub api_access_feature_key: String,
@@ -115,6 +129,44 @@ pub enum FailMode {
     /// Reject requests with 503 when Aether is unreachable. Max cost safety, but
     /// an outage takes AI down.
     Closed,
+}
+
+/// Behavior of the pre-request spend check when Aether is unreachable, by
+/// where the request's managed spend is charged
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendFailModes {
+    /// A request charged anywhere but the credit wallet (an included
+    /// allowance meter)
+    pub default: FailMode,
+    /// A request charged to the pooled credit wallet
+    pub wallet: FailMode,
+}
+
+impl SpendFailModes {
+    /// The same behavior wherever spend is charged
+    #[must_use]
+    pub fn uniform(mode: FailMode) -> Self {
+        Self {
+            default: mode.clone(),
+            wallet: mode,
+        }
+    }
+
+    /// The behavior for a request whose spend is (or is not) charged to the
+    /// credit wallet
+    #[must_use]
+    pub const fn for_spend(&self, bills_wallet: bool) -> &FailMode {
+        if bills_wallet { &self.wallet } else { &self.default }
+    }
+}
+
+impl Default for SpendFailModes {
+    fn default() -> Self {
+        Self {
+            default: FailMode::default(),
+            wallet: default_wallet_fail_mode(),
+        }
+    }
 }
 
 /// Configuration for a managed provider
@@ -233,6 +285,10 @@ fn default_image_gen_feature_key() -> String {
     "image_gen_enabled".to_owned()
 }
 
+const fn default_wallet_fail_mode() -> FailMode {
+    FailMode::Closed
+}
+
 const fn default_margin() -> f64 {
     1.0
 }
@@ -277,6 +333,15 @@ fn default_messages_key() -> String {
 }
 
 impl BillingConfig {
+    /// How the pre-request spend check behaves when Aether is unreachable
+    #[must_use]
+    pub fn spend_fail_modes(&self) -> SpendFailModes {
+        SpendFailModes {
+            default: self.fail_mode.clone(),
+            wallet: self.wallet_fail_mode.clone(),
+        }
+    }
+
     /// Validate billing configuration
     ///
     /// # Errors
@@ -460,6 +525,49 @@ mod tests {
             FailMode::Closed | FailMode::Degraded => panic!("expected Open"),
             FailMode::Open => {} // allow-through path
         }
+    }
+
+    #[test]
+    fn wallet_fail_mode_defaults_to_closed_independently_of_fail_mode() {
+        // A degraded or open fail mode must never let a wallet-billed request
+        // through unbilled unless the wallet mode is relaxed explicitly
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            fail_mode = "open"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.fail_mode, FailMode::Open);
+        assert_eq!(config.wallet_fail_mode, FailMode::Closed);
+
+        let modes = config.spend_fail_modes();
+        assert_eq!(modes.for_spend(true), &FailMode::Closed);
+        assert_eq!(modes.for_spend(false), &FailMode::Open);
+    }
+
+    #[test]
+    fn wallet_fail_mode_can_be_set_explicitly() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            wallet_fail_mode = "degraded"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.spend_fail_modes().for_spend(true), &FailMode::Degraded);
+    }
+
+    #[test]
+    fn spend_fail_modes_default_fails_the_wallet_closed() {
+        let modes = SpendFailModes::default();
+        assert_eq!(modes.for_spend(true), &FailMode::Closed);
+        assert_eq!(modes.for_spend(false), &FailMode::Degraded);
+        assert_eq!(SpendFailModes::uniform(FailMode::Open).for_spend(true), &FailMode::Open);
     }
 
     #[test]
