@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use synapse_config::{FailMode, SttProviderConfig, SttProviderType};
+use synapse_config::{FailMode, SpendFailModes, SttProviderConfig, SttProviderType};
 
 use crate::{
     error::SttError,
@@ -17,9 +17,10 @@ pub struct Server {
     /// Billing client for pre-request credit checks
     #[cfg(feature = "billing")]
     billing_client: Option<synapse_billing::AetherClient>,
-    /// Behavior when billing service is unreachable
+    /// Behavior when billing service is unreachable during a spend check, by
+    /// where the request's spend is charged
     #[cfg(feature = "billing")]
-    billing_fail_mode: FailMode,
+    billing_fail_mode: SpendFailModes,
     #[cfg(feature = "billing")]
     margins: synapse_core::MarginPolicy,
 }
@@ -40,11 +41,11 @@ impl Server {
     pub fn set_billing_client(
         &mut self,
         client: synapse_billing::AetherClient,
-        fail_mode: FailMode,
+        fail_modes: SpendFailModes,
         margins: synapse_core::MarginPolicy,
     ) {
         self.billing_client = Some(client);
-        self.billing_fail_mode = fail_mode;
+        self.billing_fail_mode = fail_modes;
         self.margins = margins;
     }
 
@@ -184,7 +185,9 @@ impl Server {
                 "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"
             ))),
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(SttError::AllowanceExhausted),
-            Err(e) => match self.billing_fail_mode {
+            // A wallet-billed request follows `wallet_fail_mode` (closed by
+            // default): its balance is the only bound on its spend
+            Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
                 FailMode::Degraded => {
                     tracing::error!(
                         error = %e,
@@ -352,7 +355,7 @@ impl<'a> SttServerBuilder<'a> {
             #[cfg(feature = "billing")]
             billing_client: None,
             #[cfg(feature = "billing")]
-            billing_fail_mode: FailMode::default(),
+            billing_fail_mode: SpendFailModes::default(),
             #[cfg(feature = "billing")]
             margins: synapse_core::MarginPolicy::default(),
         })
@@ -387,7 +390,7 @@ mod key_tests {
             #[cfg(feature = "billing")]
             billing_client: None,
             #[cfg(feature = "billing")]
-            billing_fail_mode: synapse_config::FailMode::default(),
+            billing_fail_mode: synapse_config::SpendFailModes::default(),
             #[cfg(feature = "billing")]
             margins: synapse_core::MarginPolicy::default(),
         }
@@ -644,7 +647,7 @@ mod spend_tests {
             ))],
             usage_recorder: None,
             billing_client: Some(client),
-            billing_fail_mode: FailMode::Closed,
+            billing_fail_mode: synapse_config::SpendFailModes::uniform(FailMode::Closed),
             margins: MarginPolicy {
                 default_app_id: "synapse".to_owned(),
                 provider_margins: HashMap::from([("openai".to_owned(), 1.3)]),

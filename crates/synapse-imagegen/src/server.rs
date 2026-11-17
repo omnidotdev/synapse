@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use synapse_config::{FailMode, ImageGenProviderConfig, ImageGenProviderType};
+use synapse_config::{FailMode, ImageGenProviderConfig, ImageGenProviderType, SpendFailModes};
 use synapse_core::RequestContext;
 
 #[cfg(feature = "billing")]
@@ -20,9 +20,10 @@ pub struct Server {
     /// Billing client for pre-request credit checks
     #[cfg(feature = "billing")]
     billing_client: Option<synapse_billing::AetherClient>,
-    /// Behavior when billing service is unreachable
+    /// Behavior when billing service is unreachable during a spend check, by
+    /// where the request's spend is charged
     #[cfg(feature = "billing")]
-    billing_fail_mode: FailMode,
+    billing_fail_mode: SpendFailModes,
     #[cfg(feature = "billing")]
     margins: synapse_core::MarginPolicy,
 }
@@ -43,11 +44,11 @@ impl Server {
     pub fn set_billing_client(
         &mut self,
         client: synapse_billing::AetherClient,
-        fail_mode: FailMode,
+        fail_modes: SpendFailModes,
         margins: synapse_core::MarginPolicy,
     ) {
         self.billing_client = Some(client);
-        self.billing_fail_mode = fail_mode;
+        self.billing_fail_mode = fail_modes;
         self.margins = margins;
     }
 
@@ -285,7 +286,9 @@ impl Server {
                 )))
             }
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(ImageGenError::AllowanceExhausted),
-            Err(e) => match self.billing_fail_mode {
+            // A wallet-billed request follows `wallet_fail_mode` (closed by
+            // default): its balance is the only bound on its spend
+            Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
                 FailMode::Degraded => {
                     tracing::error!(
                         error = %e,
@@ -504,7 +507,7 @@ impl<'a> ImageGenServerBuilder<'a> {
             #[cfg(feature = "billing")]
             billing_client: None,
             #[cfg(feature = "billing")]
-            billing_fail_mode: FailMode::default(),
+            billing_fail_mode: SpendFailModes::default(),
             #[cfg(feature = "billing")]
             margins: synapse_core::MarginPolicy::default(),
         })
@@ -555,7 +558,7 @@ mod spend_tests {
             ))],
             usage_recorder: None,
             billing_client: Some(client),
-            billing_fail_mode: FailMode::Degraded,
+            billing_fail_mode: synapse_config::SpendFailModes::uniform(FailMode::Degraded),
             margins: MarginPolicy::default(),
         }
     }
@@ -657,6 +660,51 @@ mod spend_tests {
             plan: None,
         });
         ctx
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_wallet_check_fails_closed_while_allowance_stays_degraded() {
+        // Production posture: a degraded general fail mode, the wallet closed
+        let fail_modes = synapse_config::SpendFailModes {
+            default: FailMode::Degraded,
+            wallet: FailMode::Closed,
+        };
+
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 0).await;
+        Mock::given(method("GET"))
+            .and(path("/credits/creator/user/u1/check"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&aether)
+            .await;
+        let mut wallet_server = server(&provider, &aether);
+        wallet_server.billing_fail_mode = fail_modes.clone();
+
+        let err = wallet_server
+            .generate(&request(), &context("creator", BillingMode::Managed))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ImageGenError::BillingUnavailable));
+        assert_eq!(err.status_code(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 1).await;
+        forbid_wallet(&aether).await;
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&aether)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/record"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "eventId": "e" })))
+            .mount(&aether)
+            .await;
+        let mut allowance_server = server(&provider, &aether);
+        allowance_server.billing_fail_mode = fail_modes;
+
+        allowance_server.generate(&request(), &myfi_context()).await.unwrap();
     }
 
     #[tokio::test]

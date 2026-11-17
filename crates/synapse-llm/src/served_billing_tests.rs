@@ -124,7 +124,7 @@ async fn llm_state(cheap: &MockServer, pricey: &MockServer, aether: &MockServer,
     )
     .unwrap();
     state.set_usage_recorder(UsageRecorder::new(client.clone(), MeterKeys::default()));
-    state.set_billing_client(client, FailMode::Closed);
+    state.set_billing_client(client, synapse_config::SpendFailModes::uniform(FailMode::Closed));
     state
 }
 

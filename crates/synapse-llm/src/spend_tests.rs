@@ -9,7 +9,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use secrecy::SecretString;
 use synapse_billing::{AetherClient, MeterKeys, SpendPolicy, UsageRecorder};
-use synapse_config::{FailMode, LlmConfig, LlmProviderConfig, LlmProviderType, ModelConfig, ModelProfileConfig};
+use synapse_config::{
+    FailMode, LlmConfig, LlmProviderConfig, LlmProviderType, ModelConfig, ModelProfileConfig, SpendFailModes,
+};
 use synapse_core::{BillingIdentity, BillingMode, MarginPolicy, RequestContext};
 use url::Url;
 use wiremock::matchers::{method, path, path_regex};
@@ -55,7 +57,12 @@ impl Match for BodyApprox {
     }
 }
 
+/// State whose spend check follows `fail_mode` wherever spend is charged
 pub async fn llm_state(provider: &MockServer, aether: &MockServer, fail_mode: FailMode) -> LlmState {
+    llm_state_with(provider, aether, SpendFailModes::uniform(fail_mode)).await
+}
+
+pub async fn llm_state_with(provider: &MockServer, aether: &MockServer, fail_modes: SpendFailModes) -> LlmState {
     let mut config = LlmConfig::default();
     config.providers.insert(
         "mock".to_owned(),
@@ -100,7 +107,7 @@ pub async fn llm_state(provider: &MockServer, aether: &MockServer, fail_mode: Fa
         "ai_credits".to_owned(),
     )])));
     state.set_usage_recorder(UsageRecorder::new(client.clone(), MeterKeys::default()));
-    state.set_billing_client(client, fail_mode);
+    state.set_billing_client(client, fail_modes);
     state
 }
 
@@ -398,6 +405,271 @@ async fn wallet_product_short_on_credits_is_still_insufficient_credits() {
 
     let err = state
         .complete(request(false), context("facet", "user", "usr_1"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, LlmError::InsufficientCredits { .. }));
+}
+
+/// Production's posture: a degraded general fail mode with the wallet failing
+/// closed (the `wallet_fail_mode` default)
+const fn prod_fail_modes() -> SpendFailModes {
+    SpendFailModes {
+        default: FailMode::Degraded,
+        wallet: FailMode::Closed,
+    }
+}
+
+async fn mount_unreachable_wallet_check(aether: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(aether)
+        .await;
+}
+
+#[tokio::test]
+async fn an_unreachable_wallet_check_fails_closed_with_503_not_402() {
+    // A zero-balance user with a warm entitlement cache must not be served
+    // free while Aether is down: the request is refused before the provider
+    // is called, as a retryable outage rather than "out of credits"
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 0).await;
+    mount_unreachable_wallet_check(&aether).await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/credits/.*/deduct$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    let err = state
+        .complete(request(false), context("facet", "user", "usr_1"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, LlmError::BillingUnavailable));
+    assert_eq!(
+        synapse_core::HttpError::status_code(&err),
+        http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(synapse_core::HttpError::error_type(&err), "billing_unavailable_error");
+}
+
+#[tokio::test]
+async fn an_unreachable_wallet_check_fails_closed_for_streams() {
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 0).await;
+    mount_unreachable_wallet_check(&aether).await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    let result = state
+        .complete_stream(request(true), context("facet", "user", "usr_1"))
+        .await;
+
+    assert!(matches!(result, Err(LlmError::BillingUnavailable)));
+}
+
+#[tokio::test]
+async fn the_default_products_own_wallet_also_fails_closed() {
+    // Direct Synapse managed keys bill the gateway's own app's wallet
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 0).await;
+    Mock::given(method("GET"))
+        .and(path("/credits/synapse/user/usr_1/check"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    let err = state
+        .complete(request(false), context("synapse", "user", "usr_1"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, LlmError::BillingUnavailable));
+}
+
+#[tokio::test]
+async fn an_unreachable_allowance_check_keeps_the_general_fail_mode() {
+    // Allowance products are not wallet-billed, so production's degraded mode
+    // still serves them during an outage, exactly as before
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    forbid_wallet(&aether).await;
+    mount_usage_meters(&aether).await;
+    Mock::given(method("GET"))
+        .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&aether)
+        .await;
+    mount_allowance_record(&aether, 1).await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    state
+        .complete(request(false), context("myfi", "organization", "org_1"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn byok_requests_never_reach_the_spend_check() {
+    // BYOK has no spend check, so an Aether outage cannot refuse it
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    mount_usage_meters(&aether).await;
+    Mock::given(path_regex(r"^/credits/"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(0)
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+    let mut ctx = context("facet", "user", "usr_1");
+    if let Some(identity) = ctx.billing_identity.as_mut() {
+        identity.mode = BillingMode::Byok;
+    }
+    ctx.provider_keys
+        .insert("mock".to_owned(), SecretString::from("user-key".to_owned()));
+
+    state.complete(request(false), ctx).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_relaxed_wallet_fail_mode_serves_through_an_outage() {
+    // The wallet posture is a config choice: set to degraded, the old
+    // availability-first behavior returns
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    mount_usage_meters(&aether).await;
+    mount_unreachable_wallet_check(&aether).await;
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, SpendFailModes::uniform(FailMode::Degraded)).await;
+
+    state
+        .complete(request(false), context("facet", "user", "usr_1"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn post_usage_wallet_debits_are_settlements() {
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    mount_usage_meters(&aether).await;
+    Mock::given(method("GET"))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sufficient": true, "balance": 50.0
+        })))
+        .mount(&aether)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({ "settle": true }),
+        ))
+        .and(BodyApprox("amount", ACTUAL_USD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true, "balance": -1.0
+        })))
+        .expect(1)
+        .named("the post-usage debit is sent as a settlement")
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    state
+        .complete(request(false), context("facet", "user", "usr_1"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_rejected_settlement_debit_never_fails_the_served_request_or_retries() {
+    // The response was already served; a debit Aether refuses is logged for
+    // reconciliation and attempted exactly once
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    mount_usage_meters(&aether).await;
+    Mock::given(method("GET"))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sufficient": true, "balance": 50.0
+        })))
+        .mount(&aether)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/credits/facet/user/usr_1/deduct"))
+        .respond_with(ResponseTemplate::new(422).set_body_string("unknown property settle"))
+        .expect(1)
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    let response = state
+        .complete(request(false), context("facet", "user", "usr_1"))
+        .await
+        .unwrap();
+
+    assert!(response.usage.is_some());
+}
+
+#[tokio::test]
+async fn a_vision_request_is_estimated_with_its_image_tokens() {
+    // A 1024x1024 PNG is about 1399 input tokens on top of the 1000 text
+    // tokens: (2399 x $1000 + 1000 x $2000) / 1M = $4.399 upstream, $8.798
+    // retail at the 2.0 product margin
+    use base64::Engine;
+
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend_from_slice(&1024u32.to_be_bytes());
+    png.extend_from_slice(&1024u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let image = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&png)
+    );
+    let vision_request: CompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": format!("mock/{MODEL}"),
+        "messages": [{ "role": "user", "content": [
+            { "type": "text", "text": "x".repeat(4000) },
+            { "type": "image", "url": image },
+        ]}],
+        "params": { "max_tokens": 1000 },
+        "stream": false,
+    }))
+    .unwrap();
+
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 0).await;
+    Mock::given(method("GET"))
+        .and(path("/credits/facet/user/usr_1/check"))
+        .and(QueryApprox("amount", 8.798))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sufficient": false, "balance": 5.0
+        })))
+        .expect(1)
+        .named("credit check priced with the image tokens")
+        .mount(&aether)
+        .await;
+
+    let state = llm_state_with(&provider, &aether, prod_fail_modes()).await;
+
+    let err = state
+        .complete(vision_request, context("facet", "user", "usr_1"))
         .await
         .unwrap_err();
 

@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use futures_util::{Stream, StreamExt};
 use secrecy::SecretString;
-use synapse_config::{FailMode, FailoverConfig, LlmConfig, LlmProviderType, RoutingConfig};
+#[cfg(feature = "billing")]
+use synapse_config::{FailMode, SpendFailModes};
+use synapse_config::{FailoverConfig, LlmConfig, LlmProviderType, RoutingConfig};
 use synapse_core::RequestContext;
 use synapse_routing::{FeedbackTracker, ModelRegistry, RequestFeedback, StrategyRegistry};
 
@@ -87,9 +89,10 @@ pub(crate) struct LlmStateInner {
     /// Billing client for pre-request credit checks (billing feature only)
     #[cfg(feature = "billing")]
     pub(crate) billing_client: Option<synapse_billing::AetherClient>,
-    /// Behavior when billing service is unreachable
+    /// Behavior when billing service is unreachable during a spend check,
+    /// by where the request's spend is charged
     #[cfg(feature = "billing")]
-    pub(crate) billing_fail_mode: FailMode,
+    pub(crate) billing_fail_mode: SpendFailModes,
     /// Response cache (cache feature only)
     #[cfg(feature = "cache")]
     pub(crate) response_cache: Option<synapse_cache::ResponseCache>,
@@ -558,7 +561,7 @@ impl LlmState {
                 #[cfg(feature = "billing")]
                 billing_client: None,
                 #[cfg(feature = "billing")]
-                billing_fail_mode: FailMode::default(),
+                billing_fail_mode: SpendFailModes::default(),
                 #[cfg(feature = "cache")]
                 response_cache: None,
             }),
@@ -632,10 +635,10 @@ impl LlmState {
     ///
     /// Panics if called after the inner `Arc` has been cloned
     #[cfg(feature = "billing")]
-    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_mode: FailMode) {
+    pub fn set_billing_client(&mut self, client: synapse_billing::AetherClient, fail_modes: SpendFailModes) {
         let inner = Arc::get_mut(&mut self.inner).expect("set_billing_client must be called before state is shared");
         inner.billing_client = Some(client);
-        inner.billing_fail_mode = fail_mode;
+        inner.billing_fail_mode = fail_modes;
     }
 
     /// Attach a response cache for LLM completions
@@ -1851,8 +1854,9 @@ impl LlmState {
             return Ok(None);
         }
 
-        // Estimate input tokens from message content
-        let estimated_input: usize = request.messages.iter().map(|m| m.content.as_text().len() / 4).sum();
+        // Estimate input tokens from message content, images included (a
+        // vision request's image tokens are billed like any other input)
+        let estimated_input = crate::estimate::estimated_input_tokens(&request.messages);
 
         // Estimate output tokens conservatively (use max_tokens if set, else default)
         let estimated_output = request.params.max_tokens.unwrap_or(1024) as usize;
@@ -1926,32 +1930,44 @@ impl LlmState {
                 message: format!("estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"),
             }),
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(LlmError::AllowanceExhausted),
-            Err(e) => match self.inner.billing_fail_mode {
-                FailMode::Degraded => {
-                    tracing::error!(
-                        error = %e,
-                        entity_id = %identity.entity_id,
-                        "spend check failed, allowing request under emergency token cap (degraded mode)"
-                    );
-                    Ok(())
+            // A wallet-billed request follows `wallet_fail_mode` (closed by
+            // default): its balance is the only bound on its spend, so it is
+            // refused with 503 rather than served unbilled
+            Err(e) => {
+                let wallet = client.bills_wallet(&identity.app_id);
+                match self.inner.billing_fail_mode.for_spend(wallet) {
+                    FailMode::Degraded => {
+                        tracing::error!(
+                            error = %e,
+                            app_id = %identity.app_id,
+                            entity_id = %identity.entity_id,
+                            wallet,
+                            "spend check failed, allowing request under emergency token cap (degraded mode)"
+                        );
+                        Ok(())
+                    }
+                    FailMode::Open => {
+                        tracing::warn!(
+                            error = %e,
+                            app_id = %identity.app_id,
+                            entity_id = %identity.entity_id,
+                            wallet,
+                            "spend check failed, allowing request (fail-open mode)"
+                        );
+                        Ok(())
+                    }
+                    FailMode::Closed => {
+                        tracing::error!(
+                            error = %e,
+                            app_id = %identity.app_id,
+                            entity_id = %identity.entity_id,
+                            wallet,
+                            "spend check failed, rejecting request (fail-closed mode)"
+                        );
+                        Err(LlmError::BillingUnavailable)
+                    }
                 }
-                FailMode::Open => {
-                    tracing::warn!(
-                        error = %e,
-                        entity_id = %identity.entity_id,
-                        "spend check failed, allowing request (fail-open mode)"
-                    );
-                    Ok(())
-                }
-                FailMode::Closed => {
-                    tracing::error!(
-                        error = %e,
-                        entity_id = %identity.entity_id,
-                        "spend check failed, rejecting request (fail-closed mode)"
-                    );
-                    Err(LlmError::BillingUnavailable)
-                }
-            },
+            }
         }
     }
 

@@ -133,7 +133,7 @@ impl Server {
                 billing_config.service_api_key.clone(),
             )?
             .with_spend_policy(spend_policy.clone());
-            llm_state.set_billing_client(credit_client, billing_config.fail_mode.clone());
+            llm_state.set_billing_client(credit_client, billing_config.spend_fail_modes());
 
             // Wire billing into STT
             {
@@ -154,7 +154,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let stt = Arc::get_mut(&mut stt_state).expect("STT state not yet shared");
-                stt.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
+                stt.set_billing_client(client, billing_config.spend_fail_modes(), margins.clone());
                 stt.set_usage_recorder(recorder);
             }
 
@@ -177,7 +177,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let tts = Arc::get_mut(&mut tts_state).expect("TTS state not yet shared");
-                tts.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
+                tts.set_billing_client(client, billing_config.spend_fail_modes(), margins.clone());
                 tts.set_usage_recorder(recorder);
             }
 
@@ -200,7 +200,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let emb = Arc::get_mut(&mut embeddings_state).expect("embeddings state not yet shared");
-                emb.set_billing_client(client, billing_config.fail_mode.clone(), margins.clone());
+                emb.set_billing_client(client, billing_config.spend_fail_modes(), margins.clone());
                 emb.set_usage_recorder(recorder);
             }
 
@@ -223,7 +223,7 @@ impl Server {
                 };
                 let recorder = synapse_billing::UsageRecorder::new(recorder_client, meter_keys);
                 let img = Arc::get_mut(&mut imagegen_state).expect("imagegen state not yet shared");
-                img.set_billing_client(client, billing_config.fail_mode.clone(), margins);
+                img.set_billing_client(client, billing_config.spend_fail_modes(), margins);
                 img.set_usage_recorder(recorder);
             }
         }
