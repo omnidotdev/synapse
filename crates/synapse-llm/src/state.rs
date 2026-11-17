@@ -1930,6 +1930,8 @@ impl LlmState {
                 message: format!("estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"),
             }),
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(LlmError::AllowanceExhausted),
+            // A free account that never bought credits may not spend the wallet
+            Ok(synapse_billing::SpendCheck::PaymentRequired) => Err(LlmError::PaymentRequired),
             // A wallet-billed request follows `wallet_fail_mode` (closed by
             // default): its balance is the only bound on its spend, so it is
             // refused with 503 rather than served unbilled

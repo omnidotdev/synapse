@@ -65,6 +65,10 @@ pub enum SpendCheck {
     /// The product's included allowance for this period cannot cover the
     /// estimate
     AllowanceExhausted,
+    /// The entity is not a paying customer (a free tier that never bought
+    /// credits), so it may not spend the pooled credit wallet at all, whatever
+    /// its balance of free grants
+    PaymentRequired,
 }
 
 /// Actual spend to charge after a request is served

@@ -44,6 +44,12 @@ pub enum EmbeddingsError {
     #[error("the included AI allowance for this period is used up")]
     AllowanceExhausted,
 
+    /// A wallet-billed managed request from an account that is not a paying
+    /// customer (a free tier that has never bought credits), refused before
+    /// the provider is called whatever its balance of free grants
+    #[error("{}", synapse_core::PAYMENT_REQUIRED_MESSAGE)]
+    PaymentRequired,
+
     /// Internal server error
     /// If Some(message), it came from a provider and can be shown
     /// If None, it's an internal error and should not leak details
@@ -67,7 +73,7 @@ impl EmbeddingsError {
                 _ => StatusCode::BAD_GATEWAY,
             },
             Self::BillingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
+            Self::AllowanceExhausted | Self::PaymentRequired => StatusCode::PAYMENT_REQUIRED,
             Self::ConfigError(_) | Self::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -81,6 +87,7 @@ impl EmbeddingsError {
             Self::ConnectionError(_) | Self::ProviderApiError { .. } => "api_error",
             Self::BillingUnavailable => "billing_unavailable_error",
             Self::AllowanceExhausted => "allowance_exhausted_error",
+            Self::PaymentRequired => synapse_core::PAYMENT_REQUIRED_ERROR_TYPE,
             Self::ConfigError(_) | Self::InternalError(_) => "internal_error",
         }
     }

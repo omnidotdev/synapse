@@ -4556,6 +4556,7 @@ dependencies = [
 name = "synapse-billing"
 version = "0.1.0"
 dependencies = [
+ "mini-moka",
  "reqwest 0.13.3",
  "secrecy 0.10.3",
  "serde",

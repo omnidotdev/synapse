@@ -52,6 +52,10 @@ pub struct EntitlementCheckResponse {
     /// Entitlement version for cache invalidation
     #[serde(default, alias = "version")]
     pub entitlement_version: Option<u64>,
+    /// Effective value of the feature (e.g. the tier name for `tier`), null
+    /// when the entity has no such entitlement
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
 }
 
 /// Single entitlement entry from Aether
@@ -93,6 +97,22 @@ pub struct CreditCheckResponse {
     /// Current credit balance
     #[serde(default)]
     pub balance: f64,
+}
+
+/// Whether an entity has ever paid real money for credits
+///
+/// GET `/credits/:appId/:entityType/:entityId/funding`. Every field is
+/// required, so a malformed answer fails to decode rather than reading as
+/// a paying customer
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditFundingResponse {
+    /// Billing account the entity resolves to (null for an unknown entity)
+    pub billing_account_id: Option<String>,
+    /// Lifetime credit purchases in USD, net of refunds and chargebacks
+    pub paid_credits_usd: f64,
+    /// Whether the net paid amount is positive
+    pub is_paying_customer: bool,
 }
 
 /// Request to deduct credits

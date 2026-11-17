@@ -817,7 +817,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/OpenAiError"
         "402":
-          description: Insufficient credits, or the included AI allowance is used up
+          description: >-
+            Insufficient credits, the included AI allowance is used up, or
+            (payment_required) managed AI billed to the credit wallet for an
+            account on a free tier that has never bought credits
           content:
             application/json:
               schema:

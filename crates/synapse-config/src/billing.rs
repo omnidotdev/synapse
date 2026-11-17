@@ -82,6 +82,19 @@ pub struct BillingConfig {
     /// check the request is refused with 503 rather than served unbilled
     #[serde(default = "default_wallet_fail_mode")]
     pub wallet_fail_mode: FailMode,
+    /// Whether a managed request billed to the pooled credit wallet is served
+    /// only to a paying customer
+    ///
+    /// Defaults to `true`. A free account costs nothing to create and the
+    /// wallet holds free credit grants from every product, so a wallet funded
+    /// only by free grants could be farmed. With this set, a wallet-billed
+    /// request is refused with 402 `payment_required` before any provider
+    /// call unless the entity is on a paid tier of the product (its `tier`
+    /// entitlement is not `free`) or has bought credits (Aether funding).
+    /// Included allowance products and BYOK are unaffected, and an Aether
+    /// outage during the check follows `wallet_fail_mode`
+    #[serde(default = "default_wallet_requires_paying_customer")]
+    pub wallet_requires_paying_customer: bool,
     /// Feature key for API access entitlement
     #[serde(default = "default_api_access_feature_key")]
     pub api_access_feature_key: String,
@@ -287,6 +300,10 @@ fn default_image_gen_feature_key() -> String {
 
 const fn default_wallet_fail_mode() -> FailMode {
     FailMode::Closed
+}
+
+const fn default_wallet_requires_paying_customer() -> bool {
+    true
 }
 
 const fn default_margin() -> f64 {
@@ -560,6 +577,33 @@ mod tests {
 
         let config: BillingConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.spend_fail_modes().for_spend(true), &FailMode::Degraded);
+    }
+
+    #[test]
+    fn wallet_requires_a_paying_customer_by_default() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert!(config.wallet_requires_paying_customer);
+    }
+
+    #[test]
+    fn wallet_paying_customer_gate_can_be_turned_off_explicitly() {
+        let toml = r#"
+            enabled = true
+            billing_url = "https://billing.omni.dev/"
+            service_api_key = "sk-test-123"
+            app_id = "synapse"
+            wallet_requires_paying_customer = false
+        "#;
+
+        let config: BillingConfig = toml::from_str(toml).unwrap();
+        assert!(!config.wallet_requires_paying_customer);
     }
 
     #[test]

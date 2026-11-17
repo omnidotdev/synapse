@@ -45,6 +45,12 @@ pub enum LlmError {
     #[error("the included AI allowance for this period is used up")]
     AllowanceExhausted,
 
+    /// A wallet-billed managed request from an account that is not a paying
+    /// customer (a free tier that has never bought credits), refused before
+    /// the provider is called whatever its balance of free grants
+    #[error("{}", synapse_core::PAYMENT_REQUIRED_MESSAGE)]
+    PaymentRequired,
+
     /// A managed (Omni-key) request named a model the gateway has no price
     /// for. Serving it would bill $0, so it is refused before the provider is
     /// called; the same model stays available with the caller's own key
@@ -93,7 +99,9 @@ impl HttpError for LlmError {
             }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::InsufficientCredits { .. } | Self::AllowanceExhausted => StatusCode::PAYMENT_REQUIRED,
+            Self::InsufficientCredits { .. } | Self::AllowanceExhausted | Self::PaymentRequired => {
+                StatusCode::PAYMENT_REQUIRED
+            }
         }
     }
 
@@ -109,6 +117,7 @@ impl HttpError for LlmError {
             Self::RateLimited { .. } => "rate_limit_error",
             Self::InsufficientCredits { .. } => "insufficient_credits_error",
             Self::AllowanceExhausted => "allowance_exhausted_error",
+            Self::PaymentRequired => synapse_core::PAYMENT_REQUIRED_ERROR_TYPE,
             Self::BillingUnavailable => "billing_unavailable_error",
             Self::Internal(_) => "internal_error",
         }

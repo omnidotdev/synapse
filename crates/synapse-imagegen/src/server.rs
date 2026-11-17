@@ -286,6 +286,8 @@ impl Server {
                 )))
             }
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(ImageGenError::AllowanceExhausted),
+            // A free account that never bought credits may not spend the wallet
+            Ok(synapse_billing::SpendCheck::PaymentRequired) => Err(ImageGenError::PaymentRequired),
             // A wallet-billed request follows `wallet_fail_mode` (closed by
             // default): its balance is the only bound on its spend
             Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
@@ -705,6 +707,48 @@ mod spend_tests {
         allowance_server.billing_fail_mode = fail_modes;
 
         allowance_server.generate(&request(), &myfi_context()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_free_account_on_the_wallet_is_refused_with_402_before_the_provider_is_called() {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 0).await;
+        Mock::given(method("GET"))
+            .and(path("/entitlements/creator/user/u1/tier/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hasEntitlement": true, "value": "free", "version": 1
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/creator/user/u1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 0, "isPayingCustomer": false
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        // Free grants in the wallet must not make it spendable
+        Mock::given(path_regex(r"^/credits/.+/(check|deduct)$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&aether)
+            .await;
+        let mut server = server(&provider, &aether);
+        server.billing_client = server
+            .billing_client
+            .map(|client| client.with_paying_customer_gate(synapse_billing::PayingCustomerGate::new()));
+
+        let err = server
+            .generate(&request(), &context("creator", BillingMode::Managed))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ImageGenError::PaymentRequired));
+        assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.error_type(), "payment_required");
+        assert_eq!(err.client_message(), synapse_core::PAYMENT_REQUIRED_MESSAGE);
     }
 
     #[tokio::test]
