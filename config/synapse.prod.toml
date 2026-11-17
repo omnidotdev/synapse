@@ -42,11 +42,6 @@ api_key = "{{ env.OPENAI_API_KEY }}"
 type = "anthropic"
 api_key = "{{ env.ANTHROPIC_API_KEY }}"
 
-[llm.providers.nvidia]
-type = "openai"
-base_url = "https://integrate.api.nvidia.com/v1"
-api_key = "{{ env.NVIDIA_API_KEY }}"
-
 # ------------------------------------
 # Intelligent Routing
 # ------------------------------------
@@ -418,10 +413,6 @@ margin = 1.0
 
 [billing.managed_providers.anthropic]
 api_key = "{{ env.ANTHROPIC_API_KEY }}"
-margin = 1.0
-
-[billing.managed_providers.nvidia]
-api_key = "{{ env.NVIDIA_API_KEY }}"
 margin = 1.0
 
 # ------------------------------------

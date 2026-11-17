@@ -246,3 +246,77 @@ fn prod_config_failover_and_routing_use_current_priced_models() {
         }
     }
 }
+
+/// Upstreams whose terms allow trial or evaluation use only (no production
+/// traffic, no reselling through a competing service), keyed by the provider
+/// name and API host they would appear under
+const TRIAL_ONLY_PROVIDERS: &[(&str, &str)] = &[("nvidia", "api.nvidia.com")];
+
+/// Production must never route, price, bill, or offer a trial-only upstream:
+/// no provider entry for it, no managed key, and no priced, failover, routing,
+/// or product-policy model under its name
+#[test]
+fn prod_config_excludes_trial_only_providers() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/synapse.prod.toml");
+    let raw = std::fs::read_to_string(path).expect("read prod config");
+    let placeholders = regex::Regex::new(r"\{\{.*?\}\}").expect("placeholder pattern");
+    let expanded = placeholders.replace_all(&raw, "http://placeholder.invalid");
+    let config: synapse_config::Config = toml::from_str(&expanded).expect("parse prod config");
+
+    let mut model_ids: Vec<String> = config
+        .llm
+        .routing
+        .models
+        .iter()
+        .map(|m| format!("{}/{}", m.provider, m.model))
+        .collect();
+    model_ids.extend(
+        config
+            .llm
+            .failover
+            .equivalence_groups
+            .iter()
+            .flat_map(|g| g.models.iter().cloned()),
+    );
+    let threshold = &config.llm.routing.threshold;
+    model_ids.extend(
+        [&threshold.low_complexity_model, &threshold.high_complexity_model]
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
+    if let Some(billing) = &config.billing {
+        for policy in billing.products.values() {
+            model_ids.extend(policy.models.iter().cloned());
+            model_ids.push(policy.default_model.clone());
+        }
+    }
+
+    for (name, host) in TRIAL_ONLY_PROVIDERS {
+        assert!(
+            !raw.to_lowercase().contains(host),
+            "prod config points at trial-only host {host}"
+        );
+        assert!(
+            !config.llm.providers.contains_key(*name),
+            "prod config declares trial-only LLM provider {name}"
+        );
+        for (provider, provider_config) in &config.llm.providers {
+            let base = provider_config.base_url.as_ref().map(url::Url::as_str);
+            assert!(
+                !base.is_some_and(|url| url.contains(host)),
+                "LLM provider {provider} points at trial-only host {host}"
+            );
+        }
+        if let Some(billing) = &config.billing {
+            assert!(
+                !billing.managed_providers.contains_key(*name),
+                "prod config holds a managed key for trial-only provider {name}"
+            );
+        }
+        let prefix = format!("{name}/");
+        for id in &model_ids {
+            assert!(!id.starts_with(&prefix), "{id} routes to trial-only provider {name}");
+        }
+    }
+}

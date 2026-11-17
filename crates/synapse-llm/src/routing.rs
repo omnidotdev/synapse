@@ -224,7 +224,8 @@ impl ModelRouter {
 
             let Some(model_config) = model_config else {
                 // A prefix that names no provider can be part of the model id
-                // itself (e.g. `moonshotai/kimi-k2.5`, priced under nvidia)
+                // itself (e.g. `moonshotai/kimi-k2.5`, priced under an
+                // OpenAI-compatible provider)
                 if let Some(provider) = self.infer_provider(model) {
                     return Ok(ResolvedModel {
                         provider_name: provider,
@@ -440,8 +441,8 @@ mod tests {
         }
     }
 
-    /// The production shape: an OpenAI-compatible nvidia provider sits beside
-    /// the first-party openai and anthropic providers
+    /// A mixed shape: a third-party OpenAI-compatible provider (fixture name
+    /// `nvidia`) sits beside the first-party openai and anthropic providers
     fn prod_like() -> LlmConfig {
         let mut config = LlmConfig::default();
         config
