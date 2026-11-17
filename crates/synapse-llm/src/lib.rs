@@ -22,6 +22,8 @@ pub mod handler;
 pub mod health;
 #[cfg(test)]
 mod key_tests;
+#[cfg(all(test, feature = "billing", feature = "http"))]
+mod paying_customer_tests;
 pub mod policy;
 #[cfg(all(test, feature = "billing"))]
 mod product_policy_tests;

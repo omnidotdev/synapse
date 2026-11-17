@@ -59,6 +59,24 @@ fn prod_config_fails_wallet_spend_checks_closed() {
     );
 }
 
+/// Managed AI on the pooled credit wallet is never spendable by a free
+/// account that never paid, so free grants cannot be farmed
+#[test]
+fn prod_config_requires_a_paying_customer_for_wallet_spend() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/synapse.prod.toml");
+    let raw = std::fs::read_to_string(path).expect("read prod config");
+    assert!(
+        raw.contains("\nwallet_requires_paying_customer = true\n"),
+        "prod must set wallet_requires_paying_customer explicitly"
+    );
+    let placeholders = regex::Regex::new(r"\{\{.*?\}\}").expect("placeholder pattern");
+    let expanded = placeholders.replace_all(&raw, "http://placeholder.invalid");
+    let config: synapse_config::Config = toml::from_str(&expanded).expect("parse prod config");
+    let billing = config.billing.expect("billing configured");
+
+    assert!(billing.wallet_requires_paying_customer);
+}
+
 /// Every product with a product-scoped chat key has a model policy, so its
 /// picker and default come from the gateway, and the policy matches what the
 /// product sends today (each listed model is priced: `validate` checks that)

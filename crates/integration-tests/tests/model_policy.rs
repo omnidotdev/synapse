@@ -55,6 +55,14 @@ async fn mock_api() -> MockServer {
 /// Aether granting every check except smart routing, with funded wallets
 async fn mock_aether() -> MockServer {
     let aether = MockServer::start().await;
+    // A paying customer, so the wallet's paying-customer gate lets it spend
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/credits/.+/funding$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "billingAccountId": "ba_1", "paidCreditsUsd": 10.0, "isPayingCustomer": true
+        })))
+        .mount(&aether)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/entitlements/.+/smart_routing/check$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "hasEntitlement": false })))

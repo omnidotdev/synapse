@@ -89,6 +89,14 @@ fn creator_key(mode: &str, provider_keys: serde_json::Value) -> serde_json::Valu
 /// mounted per test
 async fn mock_aether() -> MockServer {
     let aether = MockServer::start().await;
+    // A paying customer, so the wallet's paying-customer gate lets it spend
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/credits/.+/funding$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "billingAccountId": "ba_1", "paidCreditsUsd": 10.0, "isPayingCustomer": true
+        })))
+        .mount(&aether)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/entitlements/.+/check$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "hasEntitlement": true })))
@@ -274,6 +282,41 @@ async fn out_of_credits_edit_is_refused_with_402_before_the_provider() {
     assert_eq!(resp.status(), 402);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"]["type"], "insufficient_credits_error");
+    assert!(mock.image_edits().is_empty());
+}
+
+#[tokio::test]
+async fn a_free_account_is_refused_with_payment_required_before_the_provider() {
+    // A free tier that never bought credits may not spend the wallet, even
+    // with free grants in it: refused before the balance check and provider
+    let mock = MockLlm::start().await.unwrap();
+    let api = mock_api(creator_key("managed", serde_json::json!([]))).await;
+    let aether = mock_aether().await;
+    Mock::given(method("GET"))
+        .and(path("/credits/creator/user/u1/funding"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "billingAccountId": "ba_1", "paidCreditsUsd": 0, "isPayingCustomer": false
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&aether)
+        .await;
+    Mock::given(path_regex(r"^/credits/creator/user/u1/(check|deduct)$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&aether)
+        .await;
+    let server = billed_server(&mock, &api, &aether).await;
+
+    let resp = send_edit(&server, edit_form("mock/gpt-image-1.5")).await;
+
+    assert_eq!(resp.status(), 402);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"]["type"], "payment_required");
+    assert_eq!(
+        json["error"]["message"],
+        "AI generation uses Omni credits. Buy credits or upgrade your plan to start."
+    );
     assert!(mock.image_edits().is_empty());
 }
 

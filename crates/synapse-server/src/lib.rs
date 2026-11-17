@@ -113,6 +113,31 @@ impl Server {
                 tracing::info!(product, meter, "AI included in tier, spend bounded by allowance meter");
             }
 
+            // Managed AI on the credit wallet is for paying customers only, so
+            // free grants cannot be farmed with fresh accounts. One gate is
+            // shared by every modality so they reuse each other's decisions
+            let paying_customer_gate = billing_config
+                .wallet_requires_paying_customer
+                .then(synapse_billing::PayingCustomerGate::new);
+            if paying_customer_gate.is_some() {
+                tracing::info!("wallet-billed managed AI requires a paying customer");
+            } else {
+                tracing::warn!("wallet_requires_paying_customer is off, free accounts may spend the credit wallet");
+            }
+
+            // Client for the pre-request spend checks of one modality
+            let spend_client = || {
+                let client = synapse_billing::AetherClient::new(
+                    billing_config.billing_url.clone(),
+                    billing_config.service_api_key.clone(),
+                )?
+                .with_spend_policy(spend_policy.clone());
+                Ok::<_, synapse_billing::BillingError>(match &paying_customer_gate {
+                    Some(gate) => client.with_paying_customer_gate(gate.clone()),
+                    None => client,
+                })
+            };
+
             // Attach usage recorder for LLM
             let recorder_client = synapse_billing::AetherClient::new(
                 billing_config.billing_url.clone(),
@@ -128,20 +153,12 @@ impl Server {
             llm_state.set_usage_recorder(recorder);
 
             // Attach billing client for pre-request spend checks (LLM)
-            let credit_client = synapse_billing::AetherClient::new(
-                billing_config.billing_url.clone(),
-                billing_config.service_api_key.clone(),
-            )?
-            .with_spend_policy(spend_policy.clone());
+            let credit_client = spend_client()?;
             llm_state.set_billing_client(credit_client, billing_config.spend_fail_modes());
 
             // Wire billing into STT
             {
-                let client = synapse_billing::AetherClient::new(
-                    billing_config.billing_url.clone(),
-                    billing_config.service_api_key.clone(),
-                )?
-                .with_spend_policy(spend_policy.clone());
+                let client = spend_client()?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
                     billing_config.service_api_key.clone(),
@@ -160,11 +177,7 @@ impl Server {
 
             // Wire billing into TTS
             {
-                let client = synapse_billing::AetherClient::new(
-                    billing_config.billing_url.clone(),
-                    billing_config.service_api_key.clone(),
-                )?
-                .with_spend_policy(spend_policy.clone());
+                let client = spend_client()?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
                     billing_config.service_api_key.clone(),
@@ -183,11 +196,7 @@ impl Server {
 
             // Wire billing into embeddings
             {
-                let client = synapse_billing::AetherClient::new(
-                    billing_config.billing_url.clone(),
-                    billing_config.service_api_key.clone(),
-                )?
-                .with_spend_policy(spend_policy.clone());
+                let client = spend_client()?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
                     billing_config.service_api_key.clone(),
@@ -206,11 +215,7 @@ impl Server {
 
             // Wire billing into image generation
             {
-                let client = synapse_billing::AetherClient::new(
-                    billing_config.billing_url.clone(),
-                    billing_config.service_api_key.clone(),
-                )?
-                .with_spend_policy(spend_policy);
+                let client = spend_client()?;
                 let recorder_client = synapse_billing::AetherClient::new(
                     billing_config.billing_url.clone(),
                     billing_config.service_api_key.clone(),

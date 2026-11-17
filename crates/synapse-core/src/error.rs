@@ -15,3 +15,12 @@ pub trait HttpError: std::error::Error {
     /// Message safe to expose to API consumers
     fn client_message(&self) -> String;
 }
+
+/// Error type of a managed request refused because its account is not a
+/// paying customer, distinct from `insufficient_credits_error`
+pub const PAYMENT_REQUIRED_ERROR_TYPE: &str = "payment_required";
+
+/// User-safe message for a managed request refused because its account is
+/// not a paying customer (a free tier that has never bought credits)
+pub const PAYMENT_REQUIRED_MESSAGE: &str =
+    "AI generation uses Omni credits. Buy credits or upgrade your plan to start.";

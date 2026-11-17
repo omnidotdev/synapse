@@ -178,6 +178,8 @@ impl Server {
                 )))
             }
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(EmbeddingsError::AllowanceExhausted),
+            // A free account that never bought credits may not spend the wallet
+            Ok(synapse_billing::SpendCheck::PaymentRequired) => Err(EmbeddingsError::PaymentRequired),
             // A wallet-billed request follows `wallet_fail_mode` (closed by
             // default): its balance is the only bound on its spend
             Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
@@ -661,5 +663,50 @@ mod spend_tests {
 
         assert!(matches!(err, EmbeddingsError::AllowanceExhausted));
         assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn a_free_account_on_the_wallet_is_refused_with_402_before_the_provider_is_called() {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_provider(&provider, 0).await;
+        Mock::given(method("GET"))
+            .and(path("/entitlements/facet/user/usr_1/tier/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hasEntitlement": true, "value": "free", "version": 1
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 0, "isPayingCustomer": false
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        // Free grants in the wallet must not make it spendable
+        Mock::given(path_regex(r"^/credits/.+/(check|deduct)$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&aether)
+            .await;
+        let mut server = server(&provider, &aether);
+        server.billing_client = server
+            .billing_client
+            .map(|client| client.with_paying_customer_gate(synapse_billing::PayingCustomerGate::new()));
+        let mut ctx = myfi_context();
+        if let Some(identity) = ctx.billing_identity.as_mut() {
+            "facet".clone_into(&mut identity.app_id);
+            "user".clone_into(&mut identity.entity_type);
+            "usr_1".clone_into(&mut identity.entity_id);
+        }
+
+        let err = server.embed(&request(), &ctx).await.unwrap_err();
+
+        assert!(matches!(err, EmbeddingsError::PaymentRequired));
+        assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.error_type(), "payment_required");
+        assert_eq!(err.client_message(), synapse_core::PAYMENT_REQUIRED_MESSAGE);
     }
 }

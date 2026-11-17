@@ -185,6 +185,8 @@ impl Server {
                 "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"
             ))),
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(SttError::AllowanceExhausted),
+            // A free account that never bought credits may not spend the wallet
+            Ok(synapse_billing::SpendCheck::PaymentRequired) => Err(SttError::PaymentRequired),
             // A wallet-billed request follows `wallet_fail_mode` (closed by
             // default): its balance is the only bound on its spend
             Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
@@ -676,6 +678,61 @@ mod spend_tests {
             }),
             provider_keys: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_free_account_on_the_wallet_is_refused_with_402_before_the_provider_is_called() {
+        let (upstream, aether) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "hello" })))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/entitlements/synapse/user/usr_1/tier/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hasEntitlement": true, "value": "free", "version": 1
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/synapse/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 0, "isPayingCustomer": false
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        // Free grants in the wallet must not make it spendable
+        Mock::given(path_regex(r"^/credits/.+/(check|deduct)$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&aether)
+            .await;
+        let mut server = server(&upstream, &aether);
+        server.billing_client = server
+            .billing_client
+            .map(|client| client.with_paying_customer_gate(synapse_billing::PayingCustomerGate::new()));
+        let request = TranscriptionRequest {
+            audio: vec![0; 160_000],
+            filename: "a.wav".to_owned(),
+            content_type: "audio/wav".to_owned(),
+            model: "whisper/whisper-1".to_owned(),
+            language: None,
+            prompt: None,
+            response_format: None,
+            temperature: None,
+        };
+
+        let err = server
+            .transcribe(request, &context(&Arc::new(Mutex::new(Vec::new()))))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::SttError::PaymentRequired));
+        assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.error_type(), "payment_required");
     }
 
     // 160,000 bytes is 10 seconds of audio: $0.001 upstream, $0.0013 at the

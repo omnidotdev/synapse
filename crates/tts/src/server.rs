@@ -184,6 +184,8 @@ impl Server {
                 "insufficient credits: estimated cost ${estimated_cost:.4} exceeds available balance ${balance:.4}"
             ))),
             Ok(synapse_billing::SpendCheck::AllowanceExhausted) => Err(TtsError::AllowanceExhausted),
+            // A free account that never bought credits may not spend the wallet
+            Ok(synapse_billing::SpendCheck::PaymentRequired) => Err(TtsError::PaymentRequired),
             // A wallet-billed request follows `wallet_fail_mode` (closed by
             // default): its balance is the only bound on its spend
             Err(e) => match self.billing_fail_mode.for_spend(client.bills_wallet(&identity.app_id)) {
@@ -578,5 +580,100 @@ mod key_tests {
             header_sent(&upstream, "authorization").await,
             vec!["Bearer configured-key"]
         );
+    }
+}
+
+#[cfg(all(test, feature = "billing"))]
+mod paying_customer_tests {
+    use secrecy::SecretString;
+    use synapse_billing::{AetherClient, PayingCustomerGate};
+    use synapse_config::FailMode;
+    use synapse_core::{BillingIdentity, BillingMode};
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::Server;
+    use crate::error::TtsError;
+    use crate::provider::openai_tts::OpenAiTtsProvider;
+    use crate::request::RequestContext;
+    use crate::types::SpeechRequest;
+
+    #[tokio::test]
+    async fn a_free_account_on_the_wallet_is_refused_with_402_before_the_provider_is_called() {
+        let (upstream, aether) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/entitlements/synapse/user/usr_1/tier/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hasEntitlement": true, "value": "free", "version": 1
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/credits/synapse/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 0, "isPayingCustomer": false
+            })))
+            .expect(1)
+            .mount(&aether)
+            .await;
+        // Free grants in the wallet must not make it spendable
+        Mock::given(path_regex(r"^/credits/.+/(check|deduct)$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&aether)
+            .await;
+        let client = AetherClient::new(
+            reqwest::Url::parse(&format!("{}/", aether.uri())).unwrap(),
+            SecretString::from("aether-key".to_owned()),
+        )
+        .unwrap()
+        .with_paying_customer_gate(PayingCustomerGate::new());
+        let server = Server {
+            providers: vec![Box::new(OpenAiTtsProvider::new(
+                "openai".to_owned(),
+                SecretString::from("configured-key".to_owned()),
+                Some(format!("{}/v1", upstream.uri())),
+            ))],
+            usage_recorder: None,
+            billing_client: Some(client),
+            billing_fail_mode: synapse_config::SpendFailModes::uniform(FailMode::Closed),
+            margins: synapse_core::MarginPolicy::default(),
+        };
+        let (parts, ()) = http::Request::new(()).into_parts();
+        let context = RequestContext {
+            parts,
+            api_key: None,
+            client_identity: None,
+            authentication: synapse_core::Authentication::default(),
+            billing_identity: Some(BillingIdentity {
+                app_id: "synapse".to_owned(),
+                entity_type: "user".to_owned(),
+                entity_id: "usr_1".to_owned(),
+                mode: BillingMode::Managed,
+                plan: None,
+            }),
+            provider_keys: std::collections::HashMap::new(),
+        };
+        let request = SpeechRequest {
+            model: "openai/tts-1".to_owned(),
+            input: "hello".repeat(100),
+            voice: "alloy".to_owned(),
+            response_format: None,
+            speed: None,
+        };
+
+        let Err(err) = server.synthesize(request, &context).await else {
+            panic!("a free account must not be served");
+        };
+
+        assert!(matches!(err, TtsError::PaymentRequired));
+        assert_eq!(err.status_code(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(err.error_type(), "payment_required");
     }
 }

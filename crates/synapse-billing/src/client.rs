@@ -6,10 +6,11 @@ use url::Url;
 
 use crate::circuit::CircuitBreaker;
 use crate::error::BillingError;
+use crate::paying::{PayingCustomerGate, TIER_FEATURE_KEY, is_paid_tier};
 use crate::spend::{SpendCharge, SpendCheck, SpendPolicy, SpendTarget, usd_to_credits};
 use crate::types::{
-    CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, EntitlementCheckResponse,
-    EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
+    CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, CreditFundingResponse,
+    EntitlementCheckResponse, EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
 };
 
 /// Async HTTP client for the Aether billing API
@@ -24,6 +25,7 @@ pub struct AetherClient {
     service_api_key: SecretString,
     circuit: CircuitBreaker,
     spend_policy: SpendPolicy,
+    paying_customer_gate: Option<PayingCustomerGate>,
 }
 
 impl AetherClient {
@@ -45,6 +47,7 @@ impl AetherClient {
             service_api_key,
             circuit: CircuitBreaker::new(),
             spend_policy: SpendPolicy::default(),
+            paying_customer_gate: None,
         })
     }
 
@@ -99,11 +102,24 @@ impl AetherClient {
         self
     }
 
+    /// Serve wallet-billed spend only to paying customers, deciding through
+    /// (and caching in) `gate`
+    ///
+    /// With the gate set, [`Self::check_spend`] refuses a wallet product's
+    /// spend with [`SpendCheck::PaymentRequired`] unless the entity is on a
+    /// paid tier of the product or has bought credits. Included allowance
+    /// products are never gated
+    #[must_use]
+    pub fn with_paying_customer_gate(mut self, gate: PayingCustomerGate) -> Self {
+        self.paying_customer_gate = Some(gate);
+        self
+    }
+
     /// Check whether an estimated managed spend is covered before serving it
     ///
-    /// A wallet product checks its pooled credit balance (USD); an included
-    /// allowance product checks its allowance meter (credits) and never the
-    /// wallet
+    /// A wallet product checks its pooled credit balance (USD), after the
+    /// paying-customer gate when one is set; an included allowance product
+    /// checks its allowance meter (credits) and never the wallet
     ///
     /// # Errors
     ///
@@ -118,6 +134,11 @@ impl AetherClient {
     ) -> Result<SpendCheck, BillingError> {
         match self.spend_policy.target(app_id) {
             SpendTarget::Wallet => {
+                if let Some(gate) = &self.paying_customer_gate
+                    && !self.is_paying_customer(gate, app_id, entity_type, entity_id).await?
+                {
+                    return Ok(SpendCheck::PaymentRequired);
+                }
                 let response = self
                     .check_credits(app_id, entity_type, entity_id, estimated_usd)
                     .await?;
@@ -140,6 +161,37 @@ impl AetherClient {
                 })
             }
         }
+    }
+
+    /// Whether an entity is a paying customer of a product: on a paid tier
+    /// of it, or has bought credits
+    ///
+    /// The tier is read first and funding only for a free tier, so a paid
+    /// tier costs one Aether call. A decision is cached in `gate`; a failure
+    /// to reach Aether is returned for the caller's fail mode and never
+    /// cached
+    async fn is_paying_customer(
+        &self,
+        gate: &PayingCustomerGate,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<bool, BillingError> {
+        if let Some(is_paying) = gate.cached(app_id, entity_type, entity_id) {
+            return Ok(is_paying);
+        }
+
+        let tier = self
+            .check_entitlement(app_id, entity_type, entity_id, TIER_FEATURE_KEY)
+            .await?;
+        let is_paying = is_paid_tier(tier.value.as_ref())
+            || self
+                .credit_funding(app_id, entity_type, entity_id)
+                .await?
+                .is_paying_customer;
+
+        gate.remember(app_id, entity_type, entity_id, is_paying);
+        Ok(is_paying)
     }
 
     /// Charge the actual managed spend of a served request
@@ -384,6 +436,40 @@ impl AetherClient {
         self.read_response(result).await
     }
 
+    /// Whether an entity has ever paid real money for credits
+    ///
+    /// GET `/credits/:appId/:entityType/:entityId/funding`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails, Aether returns an error,
+    /// or the response is malformed
+    pub async fn credit_funding(
+        &self,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<CreditFundingResponse, BillingError> {
+        let url = self
+            .base_url
+            .join(&format!("credits/{app_id}/{entity_type}/{entity_id}/funding"))
+            .map_err(|e| BillingError::Api {
+                status: 0,
+                message: format!("invalid URL: {e}"),
+            })?;
+
+        self.circuit.check()?;
+
+        let result = self
+            .http
+            .get(url)
+            .header("x-service-api-key", self.service_api_key.expose_secret())
+            .send()
+            .await;
+
+        self.read_response(result).await
+    }
+
     /// Deduct credits from an entity's balance
     ///
     /// POST `/credits/:appId/:entityType/:entityId/deduct`
@@ -509,6 +595,7 @@ impl std::fmt::Debug for AetherClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paying::PayingCustomerGate;
     use crate::spend::{SpendCharge, SpendCheck, SpendPolicy};
 
     use wiremock::matchers::{body_partial_json, header, method, path, path_regex, query_param};
@@ -979,6 +1066,323 @@ mod tests {
         let result = client.check_spend("myfi", "organization", "org_1", 0.5).await;
 
         assert!(matches!(result, Err(BillingError::Request(_))));
+    }
+
+    #[tokio::test]
+    async fn credit_funding_reads_a_paying_customer() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 20, "isPayingCustomer": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let funding = client.credit_funding("facet", "user", "usr_1").await.unwrap();
+
+        assert_eq!(
+            funding,
+            CreditFundingResponse {
+                billing_account_id: Some("ba_1".to_owned()),
+                paid_credits_usd: 20.0,
+                is_paying_customer: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_funding_reads_an_unknown_entity_as_never_paid() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": null, "paidCreditsUsd": 0, "isPayingCustomer": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        let funding = client.credit_funding("facet", "user", "usr_1").await.unwrap();
+
+        assert_eq!(funding.billing_account_id, None);
+        assert!(!funding.is_paying_customer);
+    }
+
+    #[tokio::test]
+    async fn credit_funding_rejects_a_malformed_answer() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1", "paidCreditsUsd": 20
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&format!("{}/", server.uri()));
+
+        assert!(client.credit_funding("facet", "user", "usr_1").await.is_err());
+    }
+
+    fn gated_client(base_url: &str) -> AetherClient {
+        posture_client(base_url).with_paying_customer_gate(PayingCustomerGate::new())
+    }
+
+    async fn mount_tier(server: &MockServer, tier: serde_json::Value, times: u64) {
+        Mock::given(method("GET"))
+            .and(path("/entitlements/facet/user/usr_1/tier/check"))
+            .and(header("x-service-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hasEntitlement": !tier.is_null(), "value": tier, "version": 3
+            })))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_funding(server: &MockServer, is_paying: bool, times: u64) {
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1",
+                "paidCreditsUsd": if is_paying { 10.0 } else { 0.0 },
+                "isPayingCustomer": is_paying
+            })))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_balance(server: &MockServer, times: u64) {
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": true, "balance": 5.0
+            })))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_free_tier_that_never_paid_is_refused_before_the_balance_check() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_funding(&server, false, 1).await;
+        // Free grants in the wallet must not make it spendable
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::PaymentRequired);
+    }
+
+    #[tokio::test]
+    async fn an_absent_tier_that_never_paid_is_refused() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::Value::Null, 1).await;
+        mount_funding(&server, false, 1).await;
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::PaymentRequired);
+    }
+
+    #[tokio::test]
+    async fn a_free_tier_that_bought_credits_may_spend_its_balance() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_funding(&server, true, 1).await;
+        mount_balance(&server, 1).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
+    }
+
+    #[tokio::test]
+    async fn a_paid_tier_skips_the_funding_check() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("team"), 1).await;
+        mount_funding(&server, false, 0).await;
+        mount_balance(&server, 1).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
+    }
+
+    #[tokio::test]
+    async fn a_paying_customer_still_needs_the_balance() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("pro"), 1).await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sufficient": false, "balance": 0.1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::InsufficientCredits { balance: 0.1 });
+    }
+
+    #[tokio::test]
+    async fn the_decision_is_cached_across_requests() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_funding(&server, true, 1).await;
+        mount_balance(&server, 3).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        for _ in 0..3 {
+            let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+            assert_eq!(check, SpendCheck::Allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_shared_by_every_client_holding_the_gate() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_funding(&server, false, 1).await;
+        mount_balance(&server, 0).await;
+
+        let gate = PayingCustomerGate::new();
+        let chat = posture_client(&format!("{}/", server.uri())).with_paying_customer_gate(gate.clone());
+        let images = posture_client(&format!("{}/", server.uri())).with_paying_customer_gate(gate);
+
+        assert_eq!(
+            chat.check_spend("facet", "user", "usr_1", 0.5).await.unwrap(),
+            SpendCheck::PaymentRequired
+        );
+        assert_eq!(
+            images.check_spend("facet", "user", "usr_1", 0.5).await.unwrap(),
+            SpendCheck::PaymentRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_funding_check_is_an_error_and_never_cached() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 2).await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(2)
+            .mount(&server)
+            .await;
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        for _ in 0..2 {
+            let result = client.check_spend("facet", "user", "usr_1", 0.5).await;
+            assert!(matches!(result, Err(BillingError::Api { status: 503, .. })));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_funding_answer_is_an_error_not_a_paying_customer() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "paidCreditsUsd": 5 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        assert!(client.check_spend("facet", "user", "usr_1", 0.5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_tier_check_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/entitlements/facet/user/usr_1/tier/check"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_funding(&server, true, 0).await;
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let result = client.check_spend("facet", "user", "usr_1", 0.5).await;
+
+        assert!(matches!(result, Err(BillingError::Api { status: 500, .. })));
+    }
+
+    #[tokio::test]
+    async fn an_allowance_product_is_never_gated() {
+        let server = MockServer::start().await;
+        forbid_wallet_calls(&server).await;
+        Mock::given(path_regex(r"^/entitlements/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .named("an allowance product must not read its tier for the gate")
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/usage/myfi/organization/org_1/ai_credits/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": true, "current": 0.0, "limit": 300
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("myfi", "organization", "org_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
+    }
+
+    #[tokio::test]
+    async fn without_the_gate_a_wallet_product_checks_only_its_balance() {
+        let server = MockServer::start().await;
+        Mock::given(path_regex(r"^/entitlements/|/funding$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        mount_balance(&server, 1).await;
+
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
     }
 
     #[tokio::test]

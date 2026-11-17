@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Billing client for Synapse and Aether usage recording"
 
 [dependencies]
+mini-moka.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

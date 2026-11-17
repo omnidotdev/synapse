@@ -338,6 +338,15 @@ fail_mode = "degraded"
 # unreachable their balance cannot be checked, so they are refused with 503
 # billing_unavailable_error instead of being served unbilled
 wallet_fail_mode = "closed"
+# Managed AI on the pooled credit wallet is for paying customers only. A free
+# account costs nothing to create and the wallet holds the free credit grants
+# of every product, so free grants alone would be farmed. A wallet-billed
+# request is refused with 402 payment_required before any provider call
+# unless the entity's tier in the product is paid (not "free"; Omni platform
+# orgs resolve to "team") or Aether funding reports it has bought credits.
+# Included allowance products and BYOK are not gated. An Aether outage during
+# the check follows wallet_fail_mode (closed: 503)
+wallet_requires_paying_customer = true
 
 # Modality feature keys (defaults match Aether seed values)
 # stt_feature_key = "stt_enabled"
