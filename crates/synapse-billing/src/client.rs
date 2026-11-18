@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::circuit::CircuitBreaker;
 use crate::error::BillingError;
-use crate::paying::{PayingCustomerGate, TIER_FEATURE_KEY, is_paid_tier};
+use crate::paying::{PayingCustomerGate, TIER_FEATURE_KEY, WalletAccess, is_paid_tier};
 use crate::spend::{SpendCharge, SpendCheck, SpendPolicy, SpendTarget, usd_to_credits};
 use crate::types::{
     CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, CreditFundingResponse,
@@ -132,12 +132,37 @@ impl AetherClient {
         entity_id: &str,
         estimated_usd: f64,
     ) -> Result<SpendCheck, BillingError> {
+        self.check_spend_on(app_id, entity_type, entity_id, estimated_usd, false)
+            .await
+    }
+
+    /// [`Self::check_spend`] for a chat request, which a card-verified free
+    /// account may also spend its wallet on when every model that may serve
+    /// it is the product's free model (`on_free_model`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Aether is unreachable or returns an error, for the
+    /// caller's fail mode to decide
+    pub async fn check_spend_on(
+        &self,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        estimated_usd: f64,
+        on_free_model: bool,
+    ) -> Result<SpendCheck, BillingError> {
         match self.spend_policy.target(app_id) {
             SpendTarget::Wallet => {
-                if let Some(gate) = &self.paying_customer_gate
-                    && !self.is_paying_customer(gate, app_id, entity_type, entity_id).await?
-                {
-                    return Ok(SpendCheck::PaymentRequired);
+                if let Some(gate) = &self.paying_customer_gate {
+                    let allowed = match self.wallet_access_with(gate, app_id, entity_type, entity_id).await? {
+                        WalletAccess::Paying => true,
+                        WalletAccess::FreeAllowance => on_free_model,
+                        WalletAccess::Denied => false,
+                    };
+                    if !allowed {
+                        return Ok(SpendCheck::PaymentRequired);
+                    }
                 }
                 let response = self
                     .check_credits(app_id, entity_type, entity_id, estimated_usd)
@@ -163,35 +188,66 @@ impl AetherClient {
         }
     }
 
-    /// Whether an entity is a paying customer of a product: on a paid tier
-    /// of it, or has bought credits
+    /// How an entity may spend a product's credit wallet, or `None` when
+    /// wallet spend is not gated for the product (an included allowance
+    /// product, or no paying-customer gate)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Aether is unreachable or returns an error
+    pub async fn wallet_access(
+        &self,
+        app_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Option<WalletAccess>, BillingError> {
+        let Some(gate) = &self.paying_customer_gate else {
+            return Ok(None);
+        };
+        if self.spend_policy.target(app_id) != SpendTarget::Wallet {
+            return Ok(None);
+        }
+        self.wallet_access_with(gate, app_id, entity_type, entity_id)
+            .await
+            .map(Some)
+    }
+
+    /// How an entity may spend a product's wallet: paying (a paid tier, or
+    /// bought credits), the card-verified free allowance, or not at all
     ///
     /// The tier is read first and funding only for a free tier, so a paid
     /// tier costs one Aether call. A decision is cached in `gate`; a failure
     /// to reach Aether is returned for the caller's fail mode and never
     /// cached
-    async fn is_paying_customer(
+    async fn wallet_access_with(
         &self,
         gate: &PayingCustomerGate,
         app_id: &str,
         entity_type: &str,
         entity_id: &str,
-    ) -> Result<bool, BillingError> {
-        if let Some(is_paying) = gate.cached(app_id, entity_type, entity_id) {
-            return Ok(is_paying);
+    ) -> Result<WalletAccess, BillingError> {
+        if let Some(access) = gate.cached(app_id, entity_type, entity_id) {
+            return Ok(access);
         }
 
         let tier = self
             .check_entitlement(app_id, entity_type, entity_id, TIER_FEATURE_KEY)
             .await?;
-        let is_paying = is_paid_tier(tier.value.as_ref())
-            || self
-                .credit_funding(app_id, entity_type, entity_id)
-                .await?
-                .is_paying_customer;
+        let access = if is_paid_tier(tier.value.as_ref()) {
+            WalletAccess::Paying
+        } else {
+            let funding = self.credit_funding(app_id, entity_type, entity_id).await?;
+            if funding.is_paying_customer {
+                WalletAccess::Paying
+            } else if funding.card_verified {
+                WalletAccess::FreeAllowance
+            } else {
+                WalletAccess::Denied
+            }
+        };
 
-        gate.remember(app_id, entity_type, entity_id, is_paying);
-        Ok(is_paying)
+        gate.remember(app_id, entity_type, entity_id, access);
+        Ok(access)
     }
 
     /// Charge the actual managed spend of a served request
@@ -1092,6 +1148,7 @@ mod tests {
                 billing_account_id: Some("ba_1".to_owned()),
                 paid_credits_usd: 20.0,
                 is_paying_customer: true,
+                card_verified: false,
             }
         );
     }
@@ -1200,6 +1257,88 @@ mod tests {
         let check = client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap();
 
         assert_eq!(check, SpendCheck::PaymentRequired);
+    }
+
+    async fn mount_card_verified_funding(server: &MockServer, times: u64) {
+        Mock::given(method("GET"))
+            .and(path("/credits/facet/user/usr_1/funding"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "billingAccountId": "ba_1",
+                "paidCreditsUsd": 0.0,
+                "isPayingCustomer": false,
+                "cardVerified": true
+            })))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_card_verified_free_account_may_spend_on_the_free_model() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_card_verified_funding(&server, 1).await;
+        mount_balance(&server, 1).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        let check = client
+            .check_spend_on("facet", "user", "usr_1", 0.5, true)
+            .await
+            .unwrap();
+
+        assert_eq!(check, SpendCheck::Allowed);
+    }
+
+    #[tokio::test]
+    async fn a_card_verified_free_account_is_refused_any_other_model_or_modality() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_card_verified_funding(&server, 1).await;
+        mount_balance(&server, 0).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        // A chat request a paid model may serve
+        assert_eq!(
+            client
+                .check_spend_on("facet", "user", "usr_1", 0.5, false)
+                .await
+                .unwrap(),
+            SpendCheck::PaymentRequired
+        );
+        // Images, speech, and embeddings never spend the free allowance
+        assert_eq!(
+            client.check_spend("facet", "user", "usr_1", 0.5).await.unwrap(),
+            SpendCheck::PaymentRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_access_reports_the_free_allowance() {
+        let server = MockServer::start().await;
+        mount_tier(&server, serde_json::json!("free"), 1).await;
+        mount_card_verified_funding(&server, 1).await;
+
+        let client = gated_client(&format!("{}/", server.uri()));
+
+        assert_eq!(
+            client.wallet_access("facet", "user", "usr_1").await.unwrap(),
+            Some(WalletAccess::FreeAllowance)
+        );
+        // Cached: no second Aether round trip
+        assert_eq!(
+            client.wallet_access("facet", "user", "usr_1").await.unwrap(),
+            Some(WalletAccess::FreeAllowance)
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_access_is_none_without_a_gate() {
+        let server = MockServer::start().await;
+        let client = posture_client(&format!("{}/", server.uri()));
+
+        assert_eq!(client.wallet_access("facet", "user", "usr_1").await.unwrap(), None);
     }
 
     #[tokio::test]

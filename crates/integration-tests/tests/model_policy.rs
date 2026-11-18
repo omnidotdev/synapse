@@ -137,6 +137,7 @@ async fn server(mock: &MockLlm, api: &MockServer, aether: &MockServer) -> TestSe
         ProductModelPolicyConfig {
             models: vec!["mock/gpt-test".to_owned(), "mock/gpt-big".to_owned()],
             default_model: "mock/gpt-test".to_owned(),
+            free_model: None,
         },
     );
     config.validate().expect("valid config");
