@@ -113,13 +113,30 @@ fn prod_config_declares_product_model_policies() {
     );
 
     // Facet runs Sonnet 5.5 (its configured model and fallback); Opus 5.5 is
-    // the documented max-quality override
+    // the documented max-quality override, and Haiku 5.5 serves only the
+    // card-verified free allowance
     let facet = &billing.products["facet"];
     assert_eq!(facet.default_model, "anthropic/claude-sonnet-5-5");
     assert_eq!(
         facet.models,
-        ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
+        [
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-haiku-5-5"
+        ]
     );
+
+    // The card-verified free allowance is held to Haiku 5.5, the cheapest
+    // adequate model, on every wallet product; myfi bills an included
+    // allowance, never the wallet, so it has none
+    for product in ["keystone", "facet", "beacon", "creator"] {
+        assert_eq!(
+            billing.products[product].free_model.as_deref(),
+            Some("anthropic/claude-haiku-5-5"),
+            "{product}"
+        );
+    }
+    assert_eq!(billing.products["myfi"].free_model, None);
 
     // myfi sends `auto` for categorization, on Haiku 5.5 (an included allowance)
     let myfi = &billing.products["myfi"];

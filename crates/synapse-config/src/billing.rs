@@ -203,6 +203,12 @@ pub struct ProductModelPolicyConfig {
     /// Model the virtual `auto` model (and `fast`, `best`, `cheap` without
     /// the `smart_routing` entitlement) resolves to. Must be one of `models`
     pub default_model: String,
+    /// Model a free account spending its card-verified free allowance is
+    /// served, whatever it asks for (the product's cheapest adequate model).
+    /// Must be one of `models`. Without one, the product serves the free
+    /// allowance nothing: such an account is refused like any free account
+    #[serde(default)]
+    pub free_model: Option<String>,
 }
 
 impl ProductModelPolicyConfig {
@@ -230,6 +236,11 @@ impl ProductModelPolicyConfig {
                 "{label}.default_model {:?} must be one of its models",
                 self.default_model
             ));
+        }
+        if let Some(free_model) = &self.free_model
+            && !self.models.contains(free_model)
+        {
+            return Err(format!("{label}.free_model {free_model:?} must be one of its models"));
         }
         Ok(())
     }
@@ -992,11 +1003,22 @@ mod tests {
             "models = [\"anthropic/\"]\ndefault_model = \"anthropic/\"",
             // Listed twice
             "models = [\"anthropic/a\", \"anthropic/a\"]\ndefault_model = \"anthropic/a\"",
+            // Free model not listed
+            "models = [\"anthropic/a\"]\ndefault_model = \"anthropic/a\"\nfree_model = \"anthropic/b\"",
         ];
         for policy in malformed {
             let config = parse(&format!("[products.keystone]\n{policy}"));
             assert!(config.validate().is_err(), "accepted: {policy}");
         }
+    }
+
+    #[test]
+    fn validate_accepts_a_listed_free_model() {
+        let config = parse(
+            "[products.keystone]\nmodels = [\"anthropic/a\", \"anthropic/b\"]\ndefault_model = \"anthropic/b\"\nfree_model = \"anthropic/a\"",
+        );
+        assert!(config.validate().is_ok());
+        assert_eq!(config.products["keystone"].free_model.as_deref(), Some("anthropic/a"));
     }
 
     #[test]

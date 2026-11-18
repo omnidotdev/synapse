@@ -386,15 +386,23 @@ backfeed = "ai_credits"
 # refused with a 400. Every model must be priced above. Products without an
 # entry are not restricted. Embeddings, images, and speech are not governed
 # by these lists
+#
+# `free_model` is the model a free account spending its card-verified free
+# allowance (Aether funding `cardVerified`) is served, whatever it asks for:
+# the product's cheapest adequate model. A wallet product without one serves
+# the free allowance nothing. Images, speech, and embeddings never spend it
 [billing.products.keystone]
 models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
 default_model = "anthropic/claude-sonnet-5-5"
+free_model = "anthropic/claude-haiku-5-5"
 
 # facet-api runs Sonnet 5.5 (FACET_AI_MODEL and its fallback, set in IaC);
-# Opus 5.5 is the documented max-quality override
+# Opus 5.5 is the documented max-quality override. Haiku 5.5 serves the
+# card-verified free allowance only
 [billing.products.facet]
-models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
+models = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5"]
 default_model = "anthropic/claude-sonnet-5-5"
+free_model = "anthropic/claude-haiku-5-5"
 
 # Haiku-class default (D5); paid tiers pick Sonnet explicitly. The picker
 # offers the current Claude line, cheapest first: older and other-vendor
@@ -402,12 +410,14 @@ default_model = "anthropic/claude-sonnet-5-5"
 [billing.products.beacon]
 models = ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"]
 default_model = "anthropic/claude-haiku-5-5"
+free_model = "anthropic/claude-haiku-5-5"
 
 # creator-api reads its picker from GET /v1/models; Haiku 5.5 by default,
 # Sonnet 5.5 for quality, GPT-4o mini as the OpenAI option
 [billing.products.creator]
 models = ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-4o-mini"]
 default_model = "anthropic/claude-haiku-5-5"
+free_model = "anthropic/claude-haiku-5-5"
 
 # myfi sends `auto` for bulk and interactive categorization. Picking two
 # accounts from a chart is well within Haiku 5.5, and myfi's AI is an included

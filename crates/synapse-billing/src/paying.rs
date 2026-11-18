@@ -4,7 +4,11 @@
 //! the free credit grants of every product the account touched, so a wallet
 //! funded only by free grants can be farmed across fresh accounts. Managed AI
 //! billed to the wallet is therefore served only to a paying customer: an
-//! entity on a paid tier of the product, or one that has bought credits
+//! entity on a paid tier of the product, or one that has bought credits.
+//!
+//! The one exception is the card-verified free allowance: an account whose
+//! owner saved a card (one allowance per card, granted by Aether) may spend
+//! its wallet on the product's free chat model only (see [`WalletAccess`])
 
 use std::time::Duration;
 
@@ -29,6 +33,18 @@ const PAYING_TTL: Duration = Duration::from_secs(300);
 /// while a burst of refused requests does not reach Aether on every call
 const NOT_PAYING_TTL: Duration = Duration::from_secs(15);
 
+/// How an entity may spend the pooled credit wallet of a product
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletAccess {
+    /// On a paid tier of the product, or bought credits: any model
+    Paying,
+    /// A free account holding the card-verified free allowance: chat on the
+    /// product's free model only, never paid-only modalities
+    FreeAllowance,
+    /// A free account without a verified card: no wallet spend at all
+    Denied,
+}
+
 /// The product and entity an eligibility decision was made for
 ///
 /// The product is part of the key: a tier is per product, so a decision for
@@ -42,7 +58,7 @@ type GateKey = (String, String, String);
 /// is cached, never a failure to reach it
 #[derive(Clone)]
 pub struct PayingCustomerGate {
-    paying: Cache<GateKey, ()>,
+    paying: Cache<GateKey, WalletAccess>,
     not_paying: Cache<GateKey, ()>,
 }
 
@@ -64,26 +80,22 @@ impl PayingCustomerGate {
     }
 
     /// The cached decision for an entity in a product, if any
-    pub(crate) fn cached(&self, app_id: &str, entity_type: &str, entity_id: &str) -> Option<bool> {
+    pub(crate) fn cached(&self, app_id: &str, entity_type: &str, entity_id: &str) -> Option<WalletAccess> {
         let key = key(app_id, entity_type, entity_id);
-        if self.paying.contains_key(&key) {
-            Some(true)
-        } else if self.not_paying.contains_key(&key) {
-            Some(false)
-        } else {
-            None
-        }
+        self.paying
+            .get(&key)
+            .or_else(|| self.not_paying.contains_key(&key).then_some(WalletAccess::Denied))
     }
 
     /// Remember a decision Aether gave for an entity in a product
-    pub(crate) fn remember(&self, app_id: &str, entity_type: &str, entity_id: &str, is_paying: bool) {
+    pub(crate) fn remember(&self, app_id: &str, entity_type: &str, entity_id: &str, access: WalletAccess) {
         let key = key(app_id, entity_type, entity_id);
-        if is_paying {
-            self.not_paying.invalidate(&key);
-            self.paying.insert(key, ());
-        } else {
+        if access == WalletAccess::Denied {
             self.paying.invalidate(&key);
             self.not_paying.insert(key, ());
+        } else {
+            self.not_paying.invalidate(&key);
+            self.paying.insert(key, access);
         }
     }
 }
@@ -145,9 +157,9 @@ mod tests {
     fn decisions_are_scoped_to_product_and_entity() {
         let gate = PayingCustomerGate::new();
 
-        gate.remember("facet", "user", "usr_1", true);
+        gate.remember("facet", "user", "usr_1", WalletAccess::Paying);
 
-        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(true));
+        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(WalletAccess::Paying));
         assert_eq!(gate.cached("keystone", "user", "usr_1"), None);
         assert_eq!(gate.cached("facet", "organization", "usr_1"), None);
         assert_eq!(gate.cached("facet", "user", "usr_2"), None);
@@ -157,25 +169,28 @@ mod tests {
     fn a_new_decision_replaces_the_old_one() {
         let gate = PayingCustomerGate::new();
 
-        gate.remember("facet", "user", "usr_1", false);
-        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(false));
+        gate.remember("facet", "user", "usr_1", WalletAccess::Denied);
+        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(WalletAccess::Denied));
 
-        gate.remember("facet", "user", "usr_1", true);
-        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(true));
+        gate.remember("facet", "user", "usr_1", WalletAccess::Paying);
+        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(WalletAccess::Paying));
 
-        gate.remember("facet", "user", "usr_1", false);
-        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(false));
+        gate.remember("facet", "user", "usr_1", WalletAccess::FreeAllowance);
+        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(WalletAccess::FreeAllowance));
+
+        gate.remember("facet", "user", "usr_1", WalletAccess::Denied);
+        assert_eq!(gate.cached("facet", "user", "usr_1"), Some(WalletAccess::Denied));
     }
 
     #[test]
     fn a_not_paying_decision_expires_on_its_short_ttl() {
         let gate = PayingCustomerGate::with_ttls(Duration::from_secs(60), Duration::from_millis(20));
 
-        gate.remember("facet", "user", "usr_1", false);
-        gate.remember("facet", "user", "usr_2", true);
+        gate.remember("facet", "user", "usr_1", WalletAccess::Denied);
+        gate.remember("facet", "user", "usr_2", WalletAccess::Paying);
         std::thread::sleep(Duration::from_millis(60));
 
         assert_eq!(gate.cached("facet", "user", "usr_1"), None);
-        assert_eq!(gate.cached("facet", "user", "usr_2"), Some(true));
+        assert_eq!(gate.cached("facet", "user", "usr_2"), Some(WalletAccess::Paying));
     }
 }

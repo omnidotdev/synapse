@@ -17,6 +17,9 @@ pub struct ProductModelPolicy {
     models: Vec<(String, String)>,
     /// Index into `models` of the default
     default_index: usize,
+    /// Index into `models` of the model the card-verified free allowance is
+    /// served, if the product serves it at all
+    free_index: Option<usize>,
 }
 
 impl ProductModelPolicy {
@@ -31,7 +34,15 @@ impl ProductModelPolicy {
             .map(|id| id.split_once('/').map(|(p, m)| (p.to_owned(), m.to_owned())))
             .collect::<Option<_>>()?;
         let default_index = config.models.iter().position(|id| id == &config.default_model)?;
-        Some(Self { models, default_index })
+        let free_index = match &config.free_model {
+            Some(free) => Some(config.models.iter().position(|id| id == free)?),
+            None => None,
+        };
+        Some(Self {
+            models,
+            default_index,
+            free_index,
+        })
     }
 
     /// Allowed (provider, model) pairs, in listing order
@@ -43,6 +54,13 @@ impl ProductModelPolicy {
     pub fn default_model(&self) -> (&str, &str) {
         let (provider, model) = &self.models[self.default_index];
         (provider, model)
+    }
+
+    /// The (provider, model) pair the card-verified free allowance is held
+    /// to, if the product serves the free allowance
+    pub fn free_model(&self) -> Option<(&str, &str)> {
+        let (provider, model) = &self.models[self.free_index?];
+        Some((provider, model))
     }
 
     /// Whether `provider`/`model` is the default
@@ -143,6 +161,7 @@ mod tests {
         ProductModelPolicyConfig {
             models: models.iter().map(|m| (*m).to_owned()).collect(),
             default_model: default_model.to_owned(),
+            free_model: None,
         }
     }
 

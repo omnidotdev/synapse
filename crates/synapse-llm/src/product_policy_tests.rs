@@ -81,6 +81,12 @@ impl Servers {
 /// never the other one. All three are priced and in one failover group, and
 /// the threshold strategy is configured to pick the other model
 async fn llm_state(servers: &Servers) -> LlmState {
+    llm_state_with(servers, None, false).await
+}
+
+/// [`llm_state`] with keystone's free model set, and optionally the
+/// paying-customer gate on the wallet
+async fn llm_state_with(servers: &Servers, free_model: Option<&str>, gated: bool) -> LlmState {
     let mut config = LlmConfig::default();
     for (name, server, model) in [
         ("cheap", &servers.cheap, CHEAP),
@@ -131,6 +137,7 @@ async fn llm_state(servers: &Servers) -> LlmState {
         ProductModelPolicyConfig {
             models: vec![format!("cheap/{CHEAP}"), format!("pricey/{PRICEY}")],
             default_model: format!("cheap/{CHEAP}"),
+            free_model: free_model.map(str::to_owned),
         },
     )]);
     state.set_product_policies(ProductPolicies::new("synapse", &products));
@@ -141,6 +148,11 @@ async fn llm_state(servers: &Servers) -> LlmState {
     )
     .unwrap();
     state.set_usage_recorder(UsageRecorder::new(client.clone(), MeterKeys::default()));
+    let client = if gated {
+        client.with_paying_customer_gate(synapse_billing::PayingCustomerGate::new())
+    } else {
+        client
+    };
     state.set_billing_client(client, synapse_config::SpendFailModes::uniform(FailMode::Closed));
     state
 }
@@ -456,4 +468,70 @@ async fn the_gateway_own_keys_are_not_restricted() {
         .complete(request(&format!("other/{OTHER}")), context("synapse", "user", "usr_1"))
         .await
         .unwrap();
+}
+
+/// Keystone's tier is free and its funding is the card-verified allowance
+async fn mount_card_verified_free_account(aether: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/entitlements/keystone/organization/org_1/tier/check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "hasEntitlement": true, "value": "free", "version": 1
+        })))
+        .mount(aether)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/credits/keystone/organization/org_1/funding"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "billingAccountId": "ba_1",
+            "paidCreditsUsd": 0.0,
+            "isPayingCustomer": false,
+            "cardVerified": true
+        })))
+        .mount(aether)
+        .await;
+}
+
+#[tokio::test]
+async fn the_card_verified_free_allowance_is_served_the_free_model() {
+    let servers = Servers::start().await;
+    mount_completion(&servers.cheap, CHEAP, 1).await;
+    forbid_completions(&servers.pricey).await;
+    forbid_completions(&servers.other).await;
+    mount_smart_routing(&servers.aether, false).await;
+    mount_usage_meters(&servers.aether).await;
+    mount_card_verified_free_account(&servers.aether).await;
+    mount_wallet_for_cheap(&servers.aether).await;
+    let state = llm_state_with(&servers, Some(&format!("cheap/{CHEAP}")), true).await;
+
+    // Asks for the pricey model, is held to the free one and billed for it
+    state
+        .complete(request(&format!("pricey/{PRICEY}")), keystone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        metered_model(&servers.aether).await,
+        ("cheap".to_owned(), CHEAP.to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_product_without_a_free_model_refuses_the_free_allowance() {
+    let servers = Servers::start().await;
+    forbid_completions(&servers.cheap).await;
+    forbid_completions(&servers.pricey).await;
+    mount_smart_routing(&servers.aether, false).await;
+    mount_usage_meters(&servers.aether).await;
+    mount_card_verified_free_account(&servers.aether).await;
+    Mock::given(path_regex(r"^/credits/keystone/organization/org_1/(check|deduct)$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .named("a refused free allowance never reaches the wallet balance")
+        .mount(&servers.aether)
+        .await;
+    let state = llm_state_with(&servers, None, true).await;
+
+    let err = state.complete(request("auto"), keystone()).await.unwrap_err();
+
+    assert!(matches!(err, LlmError::PaymentRequired), "{err:?}");
 }

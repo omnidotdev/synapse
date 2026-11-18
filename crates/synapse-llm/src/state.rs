@@ -108,9 +108,13 @@ impl LlmState {
     #[allow(clippy::cognitive_complexity)]
     pub async fn complete(
         &self,
-        request: CompletionRequest,
+        #[cfg_attr(not(feature = "billing"), allow(unused_mut))] mut request: CompletionRequest,
         mut context: RequestContext,
     ) -> Result<CompletionResponse, LlmError> {
+        // A card-verified free account is served the product's free model
+        #[cfg(feature = "billing")]
+        self.hold_free_allowance_to_free_model(&mut request, &context).await;
+
         let (provider_name, model_id, provider, explicit_provider) =
             self.resolve_provider(&request.model, &request, &context).await?;
 
@@ -125,7 +129,8 @@ impl LlmState {
         {
             let stages = self.serving_candidates(&context, &provider_name, &model_id, explicit_provider, false);
             if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
-                self.check_spend(&context, cost).await?;
+                let on_free_model = self.served_only_by_free_model(&context, &stages);
+                self.check_spend(&context, cost, on_free_model).await?;
             }
         }
 
@@ -377,9 +382,13 @@ impl LlmState {
     #[allow(clippy::too_many_lines)]
     pub async fn complete_stream(
         &self,
-        request: CompletionRequest,
+        #[cfg_attr(not(feature = "billing"), allow(unused_mut))] mut request: CompletionRequest,
         mut context: RequestContext,
     ) -> Result<(String, EventStream), LlmError> {
+        // A card-verified free account is served the product's free model
+        #[cfg(feature = "billing")]
+        self.hold_free_allowance_to_free_model(&mut request, &context).await;
+
         let original_model = request.model.clone();
         let (provider_name, model_id, provider, explicit_provider) =
             self.resolve_provider(&request.model, &request, &context).await?;
@@ -398,7 +407,8 @@ impl LlmState {
         {
             let stages = self.serving_candidates(&context, &provider_name, &model_id, explicit_provider, cascade);
             if let Some(cost) = self.estimate_request_cost(&context, &stages, &request)? {
-                self.check_spend(&context, cost).await?;
+                let on_free_model = self.served_only_by_free_model(&context, &stages);
+                self.check_spend(&context, cost, on_free_model).await?;
             }
         }
 
@@ -1905,9 +1915,66 @@ impl LlmState {
         Ok(Some(first_attempt + later_attempts))
     }
 
+    /// Hold a card-verified free account to its product's free model
+    ///
+    /// A free account whose owner verified a card may spend its wallet (the
+    /// card-verified free allowance), but only on the product's cheapest
+    /// adequate model, so whatever model it asks for is replaced with the
+    /// product's `free_model`. Anything else is left alone: a paying
+    /// customer, a refused free account (the spend check refuses it), a
+    /// product without a free model, or an Aether outage (the spend check
+    /// follows its fail mode)
+    #[cfg(feature = "billing")]
+    async fn hold_free_allowance_to_free_model(&self, request: &mut CompletionRequest, context: &RequestContext) {
+        let Some((provider, model)) = self
+            .inner
+            .product_policies
+            .for_context(context)
+            .and_then(ProductModelPolicy::free_model)
+        else {
+            return;
+        };
+        let (Some(client), Some(identity)) = (&self.inner.billing_client, &context.billing_identity) else {
+            return;
+        };
+
+        let access = client
+            .wallet_access(&identity.app_id, &identity.entity_type, &identity.entity_id)
+            .await;
+        if matches!(access, Ok(Some(synapse_billing::WalletAccess::FreeAllowance))) {
+            request.model = format!("{provider}/{model}");
+        }
+    }
+
+    /// Whether a request is served by its product's free model, the only one
+    /// the card-verified free allowance may spend on: the resolved model is
+    /// the free model, in a single billed attempt (no cascade escalation).
+    /// Failover alternatives are the gateway's own equivalents of that model
+    /// and are priced into the spend check, so they do not disqualify it
+    #[cfg(feature = "billing")]
+    fn served_only_by_free_model(&self, context: &RequestContext, stages: &[Vec<(String, String)>]) -> bool {
+        let Some((_, free_model)) = self
+            .inner
+            .product_policies
+            .for_context(context)
+            .and_then(ProductModelPolicy::free_model)
+        else {
+            return false;
+        };
+        match stages {
+            [only] => only.first().is_some_and(|(_, model)| model == free_model),
+            _ => false,
+        }
+    }
+
     /// Check that the estimated cost is covered: by the credit wallet, or by
     /// the product's included allowance when it includes AI in its tier
-    async fn check_spend(&self, context: &RequestContext, estimated_cost: f64) -> Result<(), LlmError> {
+    async fn check_spend(
+        &self,
+        context: &RequestContext,
+        estimated_cost: f64,
+        on_free_model: bool,
+    ) -> Result<(), LlmError> {
         let Some(ref client) = self.inner.billing_client else {
             return Ok(());
         };
@@ -1917,11 +1984,12 @@ impl LlmState {
         };
 
         match client
-            .check_spend(
+            .check_spend_on(
                 &identity.app_id,
                 &identity.entity_type,
                 &identity.entity_id,
                 estimated_cost,
+                on_free_model,
             )
             .await
         {

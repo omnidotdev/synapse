@@ -113,6 +113,10 @@ pub struct CreditFundingResponse {
     pub paid_credits_usd: f64,
     /// Whether the net paid amount is positive
     pub is_paying_customer: bool,
+    /// Whether the account holds the card-verified free AI allowance. Absent
+    /// from an older Aether, which reads as not verified
+    #[serde(default)]
+    pub card_verified: bool,
 }
 
 /// Request to deduct credits
