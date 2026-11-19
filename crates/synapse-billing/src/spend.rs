@@ -71,6 +71,17 @@ pub enum SpendCheck {
     PaymentRequired,
 }
 
+/// Where a served request's spend was charged
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendSettlement {
+    /// Debited from the pooled credit wallet, under the charge's idempotency
+    /// key, which can reverse the debit
+    Wallet,
+    /// Recorded on the product's included allowance meter; the wallet is
+    /// untouched
+    Allowance,
+}
+
 /// Actual spend to charge after a request is served
 #[derive(Debug, Clone)]
 pub struct SpendCharge {

@@ -2085,16 +2085,23 @@ impl LlmState {
             reference_type: "completion".to_owned(),
         };
 
-        if let Err(e) = client
+        match client
             .settle_spend(&identity.app_id, &identity.entity_type, &identity.entity_id, &charge)
             .await
         {
-            tracing::warn!(
-                error = %e,
-                entity_id = %identity.entity_id,
-                cost = actual_cost,
-                "failed to charge usage after completion"
-            );
+            // Report the debit to the caller, which can reverse it by its key
+            Ok(synapse_billing::SpendSettlement::Wallet) => {
+                crate::charge::record_charge(&context.parts.extensions, &charge.idempotency_key);
+            }
+            Ok(synapse_billing::SpendSettlement::Allowance) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    entity_id = %identity.entity_id,
+                    cost = actual_cost,
+                    "failed to charge usage after completion"
+                );
+            }
         }
     }
 }

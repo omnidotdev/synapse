@@ -10,6 +10,7 @@
 mod body_limit_tests;
 #[cfg(all(test, feature = "billing", feature = "cache"))]
 mod cache_tests;
+pub mod charge;
 pub mod convert;
 #[cfg(all(test, feature = "billing", feature = "http"))]
 mod cost_report_tests;

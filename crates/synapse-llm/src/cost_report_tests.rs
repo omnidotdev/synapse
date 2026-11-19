@@ -11,6 +11,7 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::charge::CHARGE_ID_HEADER;
 use crate::handler::{COST_USD_HEADER, CREDITS_HEADER, PROVIDER_COST_USD_HEADER, llm_router};
 use crate::spend_tests::{
     ACTUAL_USD, MODEL, context, llm_state, mount_completion, mount_streamed_completion, mount_usage_meters, request,
@@ -217,4 +218,66 @@ async fn a_streamed_state_event_carries_the_cost() {
     }
 
     assert_eq!(cost, Some(RequestCost::new(ACTUAL_USD, UPSTREAM_USD)));
+}
+
+/// The idempotency keys of the wallet debits Aether received
+async fn debit_keys(aether: &MockServer) -> Vec<String> {
+    aether
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.url.path().ends_with("/deduct"))
+        .filter_map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).ok())
+        .filter_map(|body| body["idempotencyKey"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_non_streamed_response_names_its_wallet_debit() {
+    for uri in ["/v1/chat/completions", "/v1/messages"] {
+        let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+        mount_completion(&provider, 1).await;
+        mount_wallet(&aether).await;
+        mount_usage_meters(&aether).await;
+        let router = llm_router(llm_state(&provider, &aether, FailMode::Closed).await)
+            .layer(axum::Extension(context("facet", "user", "usr_1")));
+
+        let response = router.oneshot(post(uri, &chat(false))).await.unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::OK, "{uri}");
+        let keys = debit_keys(&aether).await;
+        assert_eq!(keys.len(), 1, "{uri}: one wallet debit");
+        assert_eq!(header(&response, CHARGE_ID_HEADER), Some(keys[0].as_str()), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn a_byok_request_names_no_charge() {
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_completion(&provider, 1).await;
+    mount_usage_meters(&aether).await;
+    let router =
+        llm_router(llm_state(&provider, &aether, FailMode::Closed).await).layer(axum::Extension(byok_context()));
+
+    let response = router
+        .oneshot(post("/v1/chat/completions", &chat(false)))
+        .await
+        .unwrap();
+
+    assert!(header(&response, CHARGE_ID_HEADER).is_none());
+}
+
+#[tokio::test]
+async fn a_streamed_response_names_no_charge_in_headers() {
+    let (provider, aether) = (MockServer::start().await, MockServer::start().await);
+    mount_streamed_completion(&provider).await;
+    mount_wallet(&aether).await;
+    mount_usage_meters(&aether).await;
+    let router = llm_router(llm_state(&provider, &aether, FailMode::Closed).await)
+        .layer(axum::Extension(context("facet", "user", "usr_1")));
+
+    let response = router.oneshot(post("/v1/chat/completions", &chat(true))).await.unwrap();
+
+    assert!(header(&response, CHARGE_ID_HEADER).is_none());
 }
