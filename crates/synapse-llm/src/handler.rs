@@ -9,6 +9,7 @@ use axum::{Json, Router, routing};
 use futures_util::{Stream, StreamExt};
 use synapse_core::RequestContext;
 
+use crate::charge::{CHARGE_ID_HEADER, ChargeLedger};
 use crate::convert;
 use crate::error::LlmError;
 use crate::protocol::anthropic::{AnthropicRequest, AnthropicResponse};
@@ -64,11 +65,12 @@ async fn openai_chat_completions(
             Err(e) => error_to_openai_response(e),
         }
     } else {
+        let (context, charges) = with_charge_ledger(context);
         match state.complete(internal_request, context).await {
             Ok(response) => {
                 let cost = response.usage.as_ref().and_then(|usage| usage.cost);
                 let wire_response: OpenAiResponse = response.into();
-                with_cost_headers(Json(wire_response).into_response(), cost)
+                with_charge_header(with_cost_headers(Json(wire_response).into_response(), cost), &charges)
             }
             Err(e) => error_to_openai_response(e),
         }
@@ -199,11 +201,12 @@ async fn anthropic_messages(
             Err(e) => error_to_anthropic_response(e),
         }
     } else {
+        let (context, charges) = with_charge_ledger(context);
         match state.complete(internal_request, context).await {
             Ok(response) => {
                 let cost = response.usage.as_ref().and_then(|usage| usage.cost);
                 let wire_response: AnthropicResponse = response.into();
-                with_cost_headers(Json(wire_response).into_response(), cost)
+                with_charge_header(with_cost_headers(Json(wire_response).into_response(), cost), &charges)
             }
             Err(e) => error_to_anthropic_response(e),
         }
@@ -295,6 +298,28 @@ fn with_cost_headers(mut response: Response, cost: Option<RequestCost>) -> Respo
         if let Ok(value) = http::HeaderValue::from_str(&value) {
             headers.insert(name, value);
         }
+    }
+    response
+}
+
+/// Install a fresh charge ledger on a non-streamed request, so the wallet
+/// debits its settlement makes can be reported back on the response
+fn with_charge_ledger(mut context: RequestContext) -> (RequestContext, ChargeLedger) {
+    let ledger = ChargeLedger::default();
+    context.parts.extensions.insert(ledger.clone());
+    (context, ledger)
+}
+
+/// Report a non-streamed request's wallet debits ([`CHARGE_ID_HEADER`]), so
+/// the caller can reverse the charge of a call it could not use. Nothing is
+/// added when nothing was debited
+fn with_charge_header(mut response: Response, charges: &ChargeLedger) -> Response {
+    let ids = charges.ids();
+    if ids.is_empty() {
+        return response;
+    }
+    if let Ok(value) = http::HeaderValue::from_str(&ids.join(", ")) {
+        response.headers_mut().insert(CHARGE_ID_HEADER, value);
     }
     response
 }

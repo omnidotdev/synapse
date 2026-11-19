@@ -7,7 +7,7 @@ use url::Url;
 use crate::circuit::CircuitBreaker;
 use crate::error::BillingError;
 use crate::paying::{PayingCustomerGate, TIER_FEATURE_KEY, WalletAccess, is_paid_tier};
-use crate::spend::{SpendCharge, SpendCheck, SpendPolicy, SpendTarget, usd_to_credits};
+use crate::spend::{SpendCharge, SpendCheck, SpendPolicy, SpendSettlement, SpendTarget, usd_to_credits};
 use crate::types::{
     CheckUsageResponse, CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, CreditFundingResponse,
     EntitlementCheckResponse, EntitlementsResponse, RecordUsageRequest, RecordUsageResponse,
@@ -254,7 +254,8 @@ impl AetherClient {
     ///
     /// A wallet product is deducted from its pooled credit balance (USD); an
     /// included allowance product records the credits on its allowance meter
-    /// and never touches the wallet
+    /// and never touches the wallet. Answers where the charge went, so a
+    /// wallet debit can be reported (and later reversed) by its idempotency key
     ///
     /// # Errors
     ///
@@ -265,7 +266,7 @@ impl AetherClient {
         entity_type: &str,
         entity_id: &str,
         charge: &SpendCharge,
-    ) -> Result<(), BillingError> {
+    ) -> Result<SpendSettlement, BillingError> {
         match self.spend_policy.target(app_id) {
             SpendTarget::Wallet => {
                 // The request was already served, so the debit is a
@@ -283,6 +284,7 @@ impl AetherClient {
                     log_unsettled_debit(app_id, entity_type, entity_id, charge, &e);
                     return Err(e);
                 }
+                Ok(SpendSettlement::Wallet)
             }
             SpendTarget::Allowance { meter_key } => {
                 let metadata = HashMap::from([
@@ -302,9 +304,9 @@ impl AetherClient {
                     metadata,
                 )
                 .await?;
+                Ok(SpendSettlement::Allowance)
             }
         }
-        Ok(())
     }
 
     /// Record usage against a meter
@@ -999,10 +1001,11 @@ mod tests {
 
         let client = posture_client(&format!("{}/", server.uri()));
 
-        client
+        let settlement = client
             .settle_spend("myfi", "organization", "org_1", &charge(0.015))
             .await
             .unwrap();
+        assert_eq!(settlement, SpendSettlement::Allowance);
     }
 
     #[tokio::test]
@@ -1027,10 +1030,11 @@ mod tests {
 
         let client = posture_client(&format!("{}/", server.uri()));
 
-        client
+        let settlement = client
             .settle_spend("facet", "user", "usr_1", &charge(0.015))
             .await
             .unwrap();
+        assert_eq!(settlement, SpendSettlement::Wallet);
     }
 
     #[tokio::test]

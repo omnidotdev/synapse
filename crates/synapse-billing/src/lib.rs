@@ -12,5 +12,5 @@ pub use client::{AetherClient, round_up_to_ledger_precision};
 pub use error::BillingError;
 pub use paying::{PayingCustomerGate, WalletAccess};
 pub use recorder::{MeterKeys, UsageEvent, UsageRecorder};
-pub use spend::{CREDITS_PER_USD, SpendCharge, SpendCheck, SpendPolicy, SpendTarget, usd_to_credits};
+pub use spend::{CREDITS_PER_USD, SpendCharge, SpendCheck, SpendPolicy, SpendSettlement, SpendTarget, usd_to_credits};
 pub use types::{CreditCheckResponse, CreditDeductRequest, CreditDeductResponse, CreditFundingResponse};
